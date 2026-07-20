@@ -1,0 +1,11 @@
+# Build output
+/build/
+/lifetree_app
+
+# Personal data — this is a real database of your actual life/projects,
+# not sample data meant to ship with the source
+lifetree.db
+
+# Editor/tooling caches — regenerated locally, not portable between machines
+.cache/
+compile_commands.json
