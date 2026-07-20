@@ -12,6 +12,9 @@
 #include "model/Entities.hpp"
 
 class ITreeController;
+class TaskAttributes;
+class CardRow;
+namespace Gtk { class Popover; }
 
 // Lightweight GObject wrapper to store node IDs inside Gio::ListStore
 class TreeObject : public Glib::Object {
@@ -30,6 +33,7 @@ class TreePanel : public Gtk::Box {
 private:
     ITreeController& m_life;
     ITreeController& m_projects;
+    TaskAttributes& m_task_attributes;
 
     Glib::RefPtr<Gio::ListStore<Glib::Object>> m_life_root_store;
     Glib::RefPtr<Gio::ListStore<Glib::Object>> m_project_root_store;
@@ -41,8 +45,6 @@ private:
     Gtk::StackSwitcher   m_switcher;
     Gtk::ListView       m_life_view;
     Gtk::ListView       m_project_view;
-    Gtk::Button         m_add_button{"[+]"};
-    Gtk::Button         m_remove_button{"[\u2212]"};
     Gtk::Button         m_new_project_button{"New Project"};
 
     void initialize_layout();
@@ -55,8 +57,25 @@ private:
     void on_setup(const Glib::RefPtr<Gtk::ListItem>& item);
     void on_bind(const Glib::RefPtr<Gtk::ListItem>& item, TreeType type);
 
-    void on_add_clicked();
-    void on_remove_clicked();
+    // Right-click on any row — a small menu (Add child, Delete, and, on
+    // the Projects tab only, Make repeating / Stop repeating). "Make
+    // repeating" is a second step within the same popover, not its own
+    // top-level item — see show_row_menu.
+    void on_row_right_clicked(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id);
+    void show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id);
+
+    // Both take the row explicitly (from the right-click that triggered
+    // them) rather than reading it back off the current selection — the
+    // context menu operates on whatever was clicked, not whatever
+    // happens to be selected.
+    void add_child(TreeType type, const Glib::RefPtr<Gtk::TreeListRow>& row, int parent_id);
+    void delete_node(TreeType type, const Glib::RefPtr<Gtk::TreeListRow>& row, int node_id);
+
+    // The weekday/count picker — "second level" of the row menu, reached
+    // via "Make repeating…". Returns the widget so show_row_menu can
+    // swap it into the still-open popover.
+    Gtk::Widget* build_repeat_config(int id, Gtk::Popover* popover);
+
     void on_new_project_clicked();
 
     // Removes any currently-materialized row whose id no longer exists in
@@ -66,14 +85,11 @@ private:
     void prune_missing(TreeType type);
 
     TreeType active_type() const;
-    Gtk::ListView& active_view();
     Glib::RefPtr<Gio::ListStore<Glib::Object>>& root_store(TreeType type);
     ITreeController& controller_for(TreeType type);
 
 public:
-    TreePanel(ITreeController& life, ITreeController& projects);
+    TreePanel(ITreeController& life, ITreeController& projects, TaskAttributes& task_attributes);
     ~TreePanel() override = default;
-
-    int resolve_id(Gtk::ListView& view, int position);
 };
 #endif

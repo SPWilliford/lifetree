@@ -89,15 +89,15 @@ public:
 
     void edit(int id, std::string_view new_text) override {
         if (!m_tree.contains(id)) return;
+        if (!m_db->write_title(m_type, id, new_text)) return; // DB write failed — leave the cache as-is
         m_tree.get_mut(id).data.title = new_text;
-        m_db->write_title(m_type, id, new_text);
         m_changed.emit();
     }
 
     void remove(int id) override {
         if (id <= 0) return; // protect the synthetic root
+        if (!m_db->remove(m_type, id)) return; // DB write failed — leave the cache as-is
         m_tree.remove(id);
-        m_db->remove(m_type, id);
         m_changed.emit();
     }
 

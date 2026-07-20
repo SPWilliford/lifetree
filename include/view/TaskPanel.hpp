@@ -14,11 +14,13 @@
 
 class ITreeController;
 class WorkLog;
+class TaskAttributes;
 
 class TaskPanel : public Gtk::Box {
 private:
     ITreeController& m_projects;
     WorkLog& m_worklog;
+    TaskAttributes& m_task_attributes;
 
     Glib::RefPtr<Gio::ListStore<Glib::Object>> m_store;
 
@@ -48,7 +50,7 @@ private:
     void refresh_completed();
 
 public:
-    TaskPanel(ITreeController& projects, WorkLog& worklog);
+    TaskPanel(ITreeController& projects, WorkLog& worklog, TaskAttributes& task_attributes);
     ~TaskPanel() override = default;
 
     // Rebuilds the list from the current set of leaf nodes. Called

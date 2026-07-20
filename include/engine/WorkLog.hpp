@@ -36,6 +36,12 @@ public:
     void record_completion(std::string_view title, std::string_view path, time_t start, time_t end);
     std::vector<WorkLogRow> entries_for_day(time_t day);
 
+    // Empties the current-session slot without recording anything. For
+    // after record_completion() — the session is now permanently in the
+    // history, so nothing should still be reading it back out of here as
+    // if it were still "current."
+    void clear_session();
+
 private:
     std::shared_ptr<Database> m_db;
 

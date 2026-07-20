@@ -2,14 +2,16 @@
 #include "view/TreePanel.hpp"   // reuses TreeObject, the id-wrapper GObject
 #include "engine/TreeController.hpp"
 #include "engine/WorkLog.hpp"
+#include "engine/TaskAttributes.hpp"
+#include <pangomm/layout.h>
 #include <gtkmm/singleselection.h>
 #include <gtkmm/signallistitemfactory.h>
 #include <gtkmm/gestureclick.h>
 #include <glibmm/main.h>
 #include <cstdio>
 
-TaskPanel::TaskPanel(ITreeController& projects, WorkLog& worklog)
-    : Gtk::Box(Gtk::Orientation::VERTICAL, 12), m_projects(projects), m_worklog(worklog)
+TaskPanel::TaskPanel(ITreeController& projects, WorkLog& worklog, TaskAttributes& task_attributes)
+    : Gtk::Box(Gtk::Orientation::VERTICAL, 12), m_projects(projects), m_worklog(worklog), m_task_attributes(task_attributes)
 {
     initialize_layout();
     bind_actions();
@@ -63,7 +65,7 @@ void TaskPanel::initialize_layout() {
     completed_scroll->set_min_content_width(300);
 
     m_stack.add(*backlog_scroll, "backlog_page", "Backlog");
-    m_stack.add(*completed_scroll, "completed_page", "Completed Today");
+    m_stack.add(*completed_scroll, "completed_page", "Complete");
     m_stack.set_hexpand(true);
     m_stack.set_vexpand(true);
     append(m_stack);
@@ -83,19 +85,45 @@ void TaskPanel::bind_actions() {
 
 void TaskPanel::on_setup(const Glib::RefPtr<Gtk::ListItem>& item) {
     auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
+    // hexpand+default(FILL) here, NOT halign(END) — the row needs to
+    // always claim the full, actual viewport width so it shrinks and
+    // grows correctly as the pane is resized. halign(END) alone doesn't
+    // do that: it only repositions the row within its own natural width,
+    // so a narrower viewport doesn't shrink it — it just scrolls
+    // horizontally instead, defaulting to showing the (now mostly blank)
+    // left edge while the real content sits off-screen to the right.
+    box->set_hexpand(true);
 
-    auto* prefix_label = Gtk::make_managed<Gtk::Label>();
-    prefix_label->add_css_class("dim-label");
+    // Absorbs the extra space, pushing title+path to sit snug against
+    // the right edge — the actual "right-justified" mechanism, applied
+    // inside a row that itself always spans the real width available.
+    auto* spacer = Gtk::make_managed<Gtk::Box>();
+    spacer->set_hexpand(true);
 
     // Plain, read-only label — this panel is a mirror of the tree, not
     // an editing surface. Double-click sends the task to the schedule
     // instead of starting an edit.
     auto* title_label = Gtk::make_managed<Gtk::Label>();
-    title_label->set_halign(Gtk::Align::START);
-    title_label->set_hexpand(true);
+    // Capped the same way path_label is below — without it, an unusually
+    // long title alone (with the spacer already squeezed to nothing)
+    // could still force the row wider than the available space.
+    title_label->set_ellipsize(Pango::EllipsizeMode::END);
+    title_label->set_max_width_chars(40);
 
-    box->append(*prefix_label);
+    auto* path_label = Gtk::make_managed<Gtk::Label>();
+    path_label->add_css_class("dim-label");
+    // Caps how wide this is allowed to want to be, same reason as
+    // SchedulePanel's staged-task label — a long path shouldn't force
+    // the row (and the panel) wider than intended. Ellipsizing from the
+    // START rather than the end, since the part closest to the actual
+    // task (the immediate parent, at the end of a root-first path) is
+    // probably more useful to keep visible than the far-off root name.
+    path_label->set_ellipsize(Pango::EllipsizeMode::START);
+    path_label->set_max_width_chars(30);
+
+    box->append(*spacer);
     box->append(*title_label);
+    box->append(*path_label);
 
     auto click = Gtk::GestureClick::create();
     click->set_button(GDK_BUTTON_PRIMARY);
@@ -117,21 +145,35 @@ void TaskPanel::on_bind(const Glib::RefPtr<Gtk::ListItem>& item) {
     auto* box = dynamic_cast<Gtk::Box*>(item->get_child());
     if (!box) return;
 
-    auto* prefix_label = dynamic_cast<Gtk::Label*>(box->get_first_child());
-    auto* title_label = dynamic_cast<Gtk::Label*>(box->get_last_child());
-    if (!prefix_label || !title_label) return;
+    // First child is now the spacer, not title_label — get_next_sibling()
+    // steps past it. path_label is still the last child either way.
+    auto* first = box->get_first_child();
+    auto* title_label = dynamic_cast<Gtk::Label*>(first ? first->get_next_sibling() : nullptr);
+    auto* path_label = dynamic_cast<Gtk::Label*>(box->get_last_child());
+    if (!title_label || !path_label) return;
 
     int id = obj->node_id();
-    int parent_id = m_projects.parent_of(id);
 
-    // 0 is the hidden root — not a real category, so no prefix in that case.
-    prefix_label->set_text(parent_id > 0 ? (m_projects.get_title(parent_id) + " - ") : "");
+    // Full path rather than just the immediate parent, matching how
+    // Completed Today shows it. ancestor_path() already excludes the
+    // hidden root, so an empty result just means nothing trails the
+    // title. If the immediate parent is a generator, its title is
+    // identical to this instance's own title (that's how spawning
+    // works) — showing it would just duplicate the title, so skip
+    // straight to its ancestors. Segments themselves stay in normal
+    // root-first reading order — only the label's position moved.
+    int parent_id = m_projects.parent_of(id);
+    std::string path = m_task_attributes.is_generator(parent_id)
+        ? m_projects.ancestor_path(parent_id)
+        : m_projects.ancestor_path(id);
     title_label->set_text(m_projects.get_title(id));
+    path_label->set_text(path.empty() ? "" : " - " + path);
 }
 
 void TaskPanel::refresh() {
     m_store->remove_all();
     for (int id : m_projects.leaves()) {
+        if (m_task_attributes.is_generator(id)) continue; // the generator itself isn't a real task
         m_store->append(TreeObject::create(id));
     }
 }

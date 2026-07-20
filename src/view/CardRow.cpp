@@ -5,6 +5,9 @@
 CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view)> on_changed)
     : Gtk::Box(Gtk::Orientation::HORIZONTAL, 12), m_on_changed(on_changed)
 {
+    m_marker.set_visible(false);
+    append(m_marker);
+
     m_label.set_text(std::string(initial_text));
     m_label.set_halign(Gtk::Align::START);
     m_label.set_hexpand(true);
@@ -47,11 +50,27 @@ CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view
         }
     });
     add_controller(click);
+
+    auto right_click = Gtk::GestureClick::create();
+    right_click->set_button(GDK_BUTTON_SECONDARY);
+    right_click->signal_pressed().connect([this](int, double, double) {
+        m_secondary_clicked.emit();
+    });
+    add_controller(right_click);
 }
 
 void CardRow::set_text(std::string_view text) {
     m_label.set_text(std::string(text));
     m_label.queue_resize();
+}
+
+void CardRow::set_marker(std::string_view emoji) {
+    if (emoji.empty()) {
+        m_marker.set_visible(false);
+    } else {
+        m_marker.set_text(std::string(emoji));
+        m_marker.set_visible(true);
+    }
 }
 
 void CardRow::set_active(bool active) {

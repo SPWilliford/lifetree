@@ -2,26 +2,50 @@
 #include "engine/AppEngine.hpp"
 
 MainWindow::MainWindow(AppEngine& engine)
-    : m_tree_panel(engine.life(), engine.projects()),
-      m_schedule_panel(engine.projects(), engine.work_log()),
-      m_task_panel(engine.projects(), engine.work_log())
+    : m_tree_panel(engine.life(), engine.projects(), engine.task_attributes()),
+      m_schedule_panel(engine.projects(), engine.work_log(), engine.task_attributes()),
+      m_task_panel(engine.projects(), engine.work_log(), engine.task_attributes())
 {
-    set_title("Life Tree");
+    set_title("LifeTree");
     set_default_size(1400, 1000);
 
     m_header_bar.set_show_title_buttons(true); // standard minimize/maximize/close
     set_titlebar(m_header_bar);                // Gtk::Window's title (set above) shows
                                                 // as the centered header bar text automatically
 
-    m_root_box.set_margin(16);
-    m_tree_panel.set_hexpand(false); // sized by its ScrolledWindow's min-content-width
-    m_task_panel.set_hexpand(false); // sized by its ScrolledWindow's min-content-width
-    m_schedule_panel.set_hexpand(true); // absorbs whatever space is left
+    m_tree_panel.set_hexpand(true);
+    m_schedule_panel.set_hexpand(true);
     m_schedule_panel.set_vexpand(true);
-    m_root_box.append(m_tree_panel);
-    m_root_box.append(m_schedule_panel);
-    m_root_box.append(m_task_panel);
-    set_child(m_root_box);
+    m_task_panel.set_hexpand(true);
+
+    // A small gap on each side facing a divider — otherwise the panels
+    // sit flush against the Paned's thin drag handle with nothing but
+    // that handle between them.
+    constexpr int GAP = 8;
+    m_tree_panel.set_margin_end(GAP);
+    m_schedule_panel.set_margin_start(GAP);
+    m_schedule_panel.set_margin_end(GAP);
+    m_task_panel.set_margin_start(GAP);
+
+    m_inner_paned.set_start_child(m_schedule_panel);
+    m_inner_paned.set_end_child(m_task_panel);
+    m_inner_paned.set_resize_start_child(true); // schedule absorbs space as the divider moves,
+    m_inner_paned.set_resize_end_child(false);  // task keeps whatever width you last dragged it to
+
+    m_outer_paned.set_start_child(m_tree_panel);
+    m_outer_paned.set_end_child(m_inner_paned);
+    m_outer_paned.set_resize_start_child(false); // tree keeps whatever width you last dragged it to
+    m_outer_paned.set_resize_end_child(true);    // the schedule+task pair absorbs the rest
+
+    // Same starting proportions the old fixed widths gave — 340 for
+    // tree, 420 for task, schedule getting whatever's left of the
+    // default 1400 width. Purely a starting point now, not a floor —
+    // every divider is draggable from here.
+    m_outer_paned.set_position(340);
+    m_inner_paned.set_position(1400 - 32 /* margin */ - 340 /* tree */ - 420 /* task */);
+
+    m_outer_paned.set_margin(16);
+    set_child(m_outer_paned);
 
     // Double-clicking a backlog row stages it in the schedule.
     m_task_panel.signal_task_chosen().connect(

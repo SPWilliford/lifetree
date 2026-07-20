@@ -6,6 +6,7 @@
 #include "engine/Database.hpp"
 #include "engine/TreeController.hpp"
 #include "engine/WorkLog.hpp"
+#include "engine/TaskAttributes.hpp"
 
 class AppEngine {
 private:
@@ -14,6 +15,7 @@ private:
     TreeController<LifeNode> m_life;
     TreeController<TaskNode> m_projects;
     WorkLog m_work_log;
+    TaskAttributes m_task_attributes;
 
 public:
     AppEngine();
@@ -25,6 +27,7 @@ public:
     ITreeController& life() { return m_life; }
     ITreeController& projects() { return m_projects; }
     WorkLog& work_log() { return m_work_log; }
+    TaskAttributes& task_attributes() { return m_task_attributes; }
 };
 
 #endif

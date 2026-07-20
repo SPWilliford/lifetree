@@ -19,6 +19,13 @@ void WorkLog::record_completion(std::string_view title, std::string_view path, t
     m_db->insert_work_log(title, path, start, end);
 }
 
+void WorkLog::clear_session() {
+    m_active = false;
+    m_task_id = -1;
+    m_start = 0;
+    m_end = 0;
+}
+
 std::vector<WorkLogRow> WorkLog::entries_for_day(time_t day) {
     return m_db->load_work_log_for_day(day);
 }
