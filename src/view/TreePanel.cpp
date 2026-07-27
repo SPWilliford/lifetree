@@ -40,6 +40,39 @@ TreePanel::TreePanel(ITreeController& life, ITreeController& projects, TaskAttri
     m_projects.connect_changed([this]() {
         Glib::signal_idle().connect_once([this]() { prune_missing(TreeType::PROJECTS); });
     });
+
+    // Colors and repeat status don't touch the tree structure itself, so
+    // m_projects' own signal above never fires for them — an
+    // already-bound, already-visible row otherwise has no way to know it
+    // needs to re-render. Gio::ListModel::items_changed() would be the
+    // direct way to say "these items changed, re-fetch and re-bind them,"
+    // but it's protected — only a model's own implementation can call it.
+    // Achieving the same thing through the public API instead: capture
+    // the current top-level ids, then remove and re-append them, which
+    // triggers the same signal internally via Gio::ListStore's own public
+    // mutation methods. Honest tradeoff either way: it resets expand
+    // state for whatever's currently open, since GTK treats a changed
+    // item as effectively new. Colors/repeating are both Projects-only
+    // concepts, so only that store needs this — Life never changes
+    // because of this signal.
+    m_task_attributes.connect_changed([this]() {
+        Glib::signal_idle().connect_once([this]() {
+            if (!m_project_root_store) return;
+
+            auto n = m_project_root_store->get_n_items();
+            std::vector<int> ids;
+            ids.reserve(n);
+            for (unsigned int i = 0; i < n; ++i) {
+                auto obj = std::dynamic_pointer_cast<TreeObject>(m_project_root_store->get_item(i));
+                if (obj) ids.push_back(obj->node_id());
+            }
+
+            m_project_root_store->remove_all();
+            for (int id : ids) {
+                m_project_root_store->append(TreeObject::create(id));
+            }
+        });
+    });
 }
 
 void TreePanel::initialize_layout() {
@@ -184,7 +217,7 @@ void TreePanel::on_setup(const Glib::RefPtr<Gtk::ListItem>& item) {
         if (!row) return;
         auto obj = std::dynamic_pointer_cast<TreeObject>(row->get_item());
         if (obj) {
-            on_row_right_clicked(*card, row, obj->node_id());
+            show_row_menu(*card, row, obj->node_id());
         }
     });
 
@@ -228,15 +261,15 @@ void TreePanel::on_bind(const Glib::RefPtr<Gtk::ListItem>& item, TreeType type) 
     // against a Life node would be a coincidental, meaningless lookup.
     bool is_generator = (type == TreeType::PROJECTS) && m_task_attributes.is_generator(obj->node_id());
     card->set_marker(is_generator ? "🔁" : "");
+
+    // Same reasoning as is_generator above — get_color() walks the
+    // Projects tree specifically, so it's only meaningful there.
+    card->set_color(type == TreeType::PROJECTS ? m_task_attributes.get_color(obj->node_id()) : "");
 }
 
 // ---------------------------------------------------------------------
-// Repeat menu
+// Row context menu
 // ---------------------------------------------------------------------
-
-void TreePanel::on_row_right_clicked(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id) {
-    show_row_menu(card, row, id);
-}
 
 void TreePanel::show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id) {
     TreeType type = active_type();
@@ -303,6 +336,16 @@ void TreePanel::show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow
         }
     }
 
+    // Colors apply to a whole project, not an arbitrary node within it —
+    // only offered on a top-level project (parent is the hidden root).
+    if (type == TreeType::PROJECTS && id > 0 && m_projects.parent_of(id) == 0) {
+        auto* color_button = Gtk::make_managed<Gtk::Button>("Set color…");
+        color_button->signal_clicked().connect([this, id, popover]() {
+            popover->set_child(*build_color_picker(id, popover));
+        });
+        menu_box->append(*color_button);
+    }
+
     popover->set_child(*menu_box);
 
     // Deferred to idle rather than unparented directly in the closed
@@ -354,6 +397,45 @@ Gtk::Widget* TreePanel::build_repeat_config(int id, Gtk::Popover* popover) {
         });
     });
     box->append(*apply_button);
+
+    return box;
+}
+
+Gtk::Widget* TreePanel::build_color_picker(int id, Gtk::Popover* popover) {
+    auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    box->set_margin(10);
+
+    // Fixed palette rather than a full color dialog — plain colored
+    // emoji as the button glyphs render as real color with zero custom
+    // drawing or CSS needed (GTK renders emoji glyphs in their native
+    // color regardless of widget styling), matching the same
+    // emoji-as-shorthand pattern already used for the generator marker.
+    auto* swatch_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
+    static const std::pair<const char*, const char*> palette[] = {
+        { "🔴", "#e57373" }, { "🟠", "#ffb74d" }, { "🟡", "#fff176" },
+        { "🟢", "#81c784" }, { "🔵", "#64b5f6" }, { "🟣", "#9575cd" },
+    };
+    for (const auto& [emoji, hex] : palette) {
+        auto* swatch_button = Gtk::make_managed<Gtk::Button>(emoji);
+        std::string hex_str = hex;
+        swatch_button->signal_clicked().connect([this, id, hex_str, popover]() {
+            popover->popdown();
+            Glib::signal_idle().connect_once([this, id, hex_str]() {
+                m_task_attributes.set_project_color(id, hex_str);
+            });
+        });
+        swatch_row->append(*swatch_button);
+    }
+    box->append(*swatch_row);
+
+    auto* clear_button = Gtk::make_managed<Gtk::Button>("Clear color");
+    clear_button->signal_clicked().connect([this, id, popover]() {
+        popover->popdown();
+        Glib::signal_idle().connect_once([this, id]() {
+            m_task_attributes.clear_project_color(id);
+        });
+    });
+    box->append(*clear_button);
 
     return box;
 }

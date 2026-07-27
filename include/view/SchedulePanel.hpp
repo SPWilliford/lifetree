@@ -18,44 +18,51 @@ class TaskAttributes;
 // The main schedule view.
 //
 // Layout is deliberately inverted from a conventional top-down calendar:
-// the timeline sits above the staged-task row, future time is above
-// center and past time is below, and the whole thing drifts downward
-// rather than up. The idea is that "future rises, past sinks" — matching
-// the app's own tree metaphor (things grow upward from a base) — reads
-// more intuitively than the usual top-to-bottom reading-order convention
-// once you're used to it.
+// future time is above center and past time is below, and the whole
+// thing drifts downward rather than up. The idea is that "future rises,
+// past sinks" — matching the app's own tree metaphor (things grow upward
+// from a base) — reads more intuitively than the usual top-to-bottom
+// reading-order convention once you're used to it.
 //
-// Header (own area, doesn't overlap the timeline, sits *below* it): the
-// staged-task slot, an activate/deactivate button, and a Complete
-// button, confined to the right half — mirroring the timeline's own
-// split above, so the staged task visually lines up with the half of
-// the timeline where its band will actually be drawn. Sitting at the
-// boundary closest to where new time keeps entering the view (from
-// beneath) is deliberate — this is effectively "the present," positioned
-// where the present actually is. A task gets staged here via
-// double-click in the backlog (TaskPanel) — this panel doesn't reach
-// into the backlog itself, it just exposes stage_task() for whoever's
-// coordinating that. Complete is the *only* place a task actually gets
-// removed from the tree — TreePanel and TaskPanel no longer do this.
+// There's no separate header anymore — the staged-task controls sit in
+// a dock attached to the right edge of the panel, overlaid on the
+// timeline rather than in a strip below it. Both the clock (on the
+// left) and the dock (on the right) sit at fixed pixel positions/widths
+// — genuinely solid, unaffected by how wide the panel itself ends up
+// being as the side panels get dragged. Resizing the panel only ever
+// changes the empty space *between* them; nothing about either end
+// needs recomputing or re-syncing when that happens, which is also what
+// keeps them from ever drifting out of sync with what they draw (see
+// CLOCK_CENTER_X, BAND_WIDTH). The staged task's band of worked time is
+// drawn growing downward from the exact point the dock's bottom edge
+// touches the line — the idea being that the band visually emerges from
+// the task producing it, the way roots grow down from a trunk.
 //
-// Body: a passive timeline of hour/half-hour/quarter-hour notches that
-// drifts downward at a slow, constant, real-time pace — future entering
-// from the top, sinking toward and past center as it becomes present,
-// then past — with a gold "now" line overlaid at its vertical center,
-// spanning the full width — and, centered within just the left half, a
-// boxed digital clock sitting right on that line. The clock used to be a
-// separate, static label in the header; merging it into the line itself
-// means "what time is it" and "where is now on this timeline" are the
-// same visual element instead of two things you have to mentally connect
-// yourself. The left half is otherwise reserved for time markers alone —
-// nothing task-related is drawn over it. The right half is where task
-// bands live: while a task is active, the span of wall-clock time you've
-// worked it is drawn there as a highlighted band — it keeps growing
-// while active, and stays put as a visual record of that work once
-// deactivated. Once a task is completed, its band is drawn from the
-// day's permanent history instead (see m_completed_bands) — so the
-// timeline keeps showing everything worked today, not just whatever's
-// currently staged.
+// The dock (m_staged_box) is two rows: play/pause and a checkmark
+// "complete" button side by side on top, the task label below — bottom
+// edge resting on the line, right-aligned against the panel's edge with
+// a small margin (see BAND_RIGHT_MARGIN, initialize_layout). Its drawn
+// frame (in draw_now_line) always stays visible, extending all the way
+// to the panel's right edge like part of the panel's own frame, even
+// with nothing staged — only the content inside (label text, which of
+// the two buttons apply) changes. Complete only ever applies once a
+// task is actually active — never to a task that hasn't been worked at
+// all — so both buttons stay in the layout at all times (keeping the
+// dock's size stable) but use opacity, not visibility, to show only
+// what currently applies; removing a button from layout instead would
+// resize the whole dock every time you activate or deactivate. A task
+// gets staged here via double-click in the backlog (TaskPanel) — this
+// panel doesn't reach into the backlog itself, it just exposes
+// stage_task() for whoever's coordinating that. Complete is the *only*
+// place a task actually gets removed from the tree — TreePanel and
+// TaskPanel no longer do this.
+//
+// Every band today — the live one and all of today's completed history
+// — shares the same fixed width and the same right-aligned position,
+// under the staged-task box. Deliberately uniform: a task's own
+// name/label width isn't what determines how wide its band is, so
+// completed bands don't shift around based on whatever happens to be
+// staged later.
 //
 // This panel doesn't do its own time bookkeeping — WorkLog owns the
 // current session (start/stop) and the permanent history. SchedulePanel
@@ -78,23 +85,37 @@ private:
     // on every 100ms tick).
     std::vector<WorkLogRow> m_completed_bands;
 
-    // header
-    Gtk::Box    m_header{Gtk::Orientation::VERTICAL, 8};
-    // Splits the staged-task row into the right half only, mirroring the
-    // timeline's own left(markers)/right(tasks) split below — m_split_row
-    // is homogeneous specifically so the divide is an exact 50/50 of the
-    // width, matching draw_timeline()'s width/2.0, regardless of how wide
-    // m_slot_row's actual content happens to be.
-    Gtk::Box    m_split_row{Gtk::Orientation::HORIZONTAL, 0};
-    Gtk::Box    m_left_spacer{Gtk::Orientation::HORIZONTAL, 0}; // empty — just claims the left half's width
-    // Vertical, not horizontal — label above, buttons below. Gives the
-    // label the full half-width to itself before anything needs to
-    // ellipsize, rather than competing with two buttons for the same row.
-    Gtk::Box    m_slot_row{Gtk::Orientation::VERTICAL, 4};
+    // Play/pause and checkmark, side by side — the top row of the
+    // staged-task dock.
+    Gtk::Box    m_staged_buttons_row{Gtk::Orientation::HORIZONTAL, 8};
+    Gtk::Button m_activate_button; // label toggles ▶ / ⏸ — see refresh_staged_label
+    Gtk::Button m_complete_button{"✓"}; // only ever active while a task is actually active — see below
+
+    // The dock's content: the buttons row on top, the task label below.
+    // Bottom-anchored to the line via a margin trick (see
+    // initialize_layout): valign(CENTER) plus a bottom margin equal to
+    // the box's own natural height means the *padded* box centers on the
+    // line, which puts the *content*'s bottom edge exactly on it, rather
+    // than centering the content itself on the line the way m_now_line's
+    // clock box does.
+    Gtk::Box    m_staged_box{Gtk::Orientation::VERTICAL, 4};
     Gtk::Label  m_slot_label;
-    Gtk::Box    m_slot_buttons_row{Gtk::Orientation::HORIZONTAL, 8};
-    Gtk::Button m_activate_button{"Activate"};
-    Gtk::Button m_complete_button{"Complete"};
+
+    // m_staged_box's true content height, cached once at construction
+    // time — *before* the bottom-anchor margin gets applied to it (see
+    // initialize_layout). get_preferred_size() on a widget that already
+    // has a margin set folds that margin back into the reported size, so
+    // re-querying m_staged_box directly later would report something
+    // like double the real content height. Reused everywhere that needs
+    // to know the content's actual height instead of re-measuring it.
+    int m_staged_box_content_height = 0;
+
+    // m_slot_label's own height alone (not the whole m_staged_box) —
+    // needed to draw a border around just the label, not the whole dock.
+    // Cached once, same reasoning as m_staged_box_content_height above;
+    // stable regardless of what text the label ends up showing, since
+    // it's a single-line, non-wrapping label.
+    int m_slot_label_height = 0;
 
     // body
     Gtk::Overlay     m_body;
@@ -104,6 +125,15 @@ private:
     void initialize_layout();
     void refresh_staged_label();
     void refresh_completed_bands();
+
+    // title/path/color for a given task id — shared by refresh_staged_label
+    // (for display), and by on_activate_clicked/on_complete_clicked
+    // (for recording a permanent segment). Must be called while the node
+    // still exists — ancestor_path()/parent_of() need it walkable, and
+    // for on_complete_clicked specifically, that means calling this
+    // *before* removing the node.
+    struct TaskSnapshot { std::string title, path, color; };
+    TaskSnapshot snapshot_task(int id) const;
 
     void draw_timeline(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height);
     void draw_now_line(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height);

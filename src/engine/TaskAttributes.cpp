@@ -18,6 +18,11 @@ void TaskAttributes::load() {
     for (auto& row : m_db->load_repeated_tasks()) {
         m_generators[row.generator_id] = row;
     }
+
+    m_project_colors.clear();
+    for (auto& row : m_db->load_project_colors()) {
+        m_project_colors[row.project_root_id] = row.color;
+    }
 }
 
 bool TaskAttributes::is_generator(int id) const {
@@ -31,11 +36,13 @@ void TaskAttributes::mark_repeating(int id, int weekday_mask, int count_per_day)
     // Immediate feedback rather than making the user wait for the next
     // scan (today, that's app restart) to see anything happen.
     spawn_if_due(id, m_generators[id]);
+    m_changed.emit();
 }
 
 void TaskAttributes::unmark_repeating(int id) {
     if (!m_db->remove_repeated_task(id)) return;
     m_generators.erase(id);
+    m_changed.emit();
 }
 
 void TaskAttributes::spawn_if_due(int id, RepeatedTaskRow& row) {
@@ -70,4 +77,32 @@ void TaskAttributes::run_spawn_scan() {
     for (auto& [id, row] : m_generators) {
         spawn_if_due(id, row);
     }
+}
+
+std::string TaskAttributes::get_color(int id) const {
+    if (!m_projects.contains(id)) return "";
+
+    // Walk up until parent is 0 (id is now the top-level project) or -1
+    // (id was already the hidden root itself — no color, nothing to walk).
+    int current = id;
+    int parent = m_projects.parent_of(current);
+    while (parent > 0) {
+        current = parent;
+        parent = m_projects.parent_of(current);
+    }
+
+    auto it = m_project_colors.find(current);
+    return (it != m_project_colors.end()) ? it->second : "";
+}
+
+void TaskAttributes::set_project_color(int project_root_id, const std::string& color) {
+    if (!m_db->set_project_color(project_root_id, color)) return;
+    m_project_colors[project_root_id] = color;
+    m_changed.emit();
+}
+
+void TaskAttributes::clear_project_color(int project_root_id) {
+    if (!m_db->clear_project_color(project_root_id)) return;
+    m_project_colors.erase(project_root_id);
+    m_changed.emit();
 }

@@ -1,6 +1,6 @@
 #include "engine/AppEngine.hpp"
 #include <gtkmm/application.h>
-#include <view/MainWindow.hpp>
+#include "view/MainWindow.hpp"
 
 AppEngine::AppEngine()
     : m_db(std::make_shared<Database>("lifetree.db")),

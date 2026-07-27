@@ -61,7 +61,6 @@ private:
     // the Projects tab only, Make repeating / Stop repeating). "Make
     // repeating" is a second step within the same popover, not its own
     // top-level item — see show_row_menu.
-    void on_row_right_clicked(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id);
     void show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id);
 
     // Both take the row explicitly (from the right-click that triggered
@@ -75,6 +74,11 @@ private:
     // via "Make repeating…". Returns the widget so show_row_menu can
     // swap it into the still-open popover.
     Gtk::Widget* build_repeat_config(int id, Gtk::Popover* popover);
+
+    // Same "second level, swapped into the still-open popover" pattern,
+    // reached via "Set color…" — a fixed palette of swatches, since
+    // that's what got decided over building a full color-dialog picker.
+    Gtk::Widget* build_color_picker(int id, Gtk::Popover* popover);
 
     void on_new_project_clicked();
 

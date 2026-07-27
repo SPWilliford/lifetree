@@ -44,7 +44,6 @@ private:
     sigc::signal<void(int)> m_task_chosen;
 
     void initialize_layout();
-    void bind_actions();
     void on_setup(const Glib::RefPtr<Gtk::ListItem>& item);
     void on_bind(const Glib::RefPtr<Gtk::ListItem>& item);
     void refresh_completed();

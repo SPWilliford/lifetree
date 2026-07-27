@@ -32,14 +32,38 @@ Database::Database(const std::string& path) {
             "  id INTEGER PRIMARY KEY, "
             "  title TEXT NOT NULL, "
             "  path TEXT NOT NULL, "
+            "  color TEXT NOT NULL DEFAULT '', "
+            "  source_task_id INTEGER NOT NULL DEFAULT -1, "
             "  start_time INTEGER NOT NULL, "
-            "  end_time INTEGER NOT NULL);");
+            "  end_time INTEGER NOT NULL, "
+            "  completed_at INTEGER NOT NULL DEFAULT 0);");
+
+    // CREATE TABLE IF NOT EXISTS above only creates work_log fresh — an
+    // existing database (created before these columns existed) already
+    // has the table without them, and won't pick them up retroactively.
+    // Checked first rather than just attempting the ALTER and catching
+    // the failure — that would mean throwing and catching a C++
+    // exception as routine, expected control flow on every single
+    // startup after the first, forever.
+    if (!has_column("work_log", "color")) {
+        execute("ALTER TABLE work_log ADD COLUMN color TEXT NOT NULL DEFAULT '';");
+    }
+    if (!has_column("work_log", "source_task_id")) {
+        execute("ALTER TABLE work_log ADD COLUMN source_task_id INTEGER NOT NULL DEFAULT -1;");
+    }
+    if (!has_column("work_log", "completed_at")) {
+        execute("ALTER TABLE work_log ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0;");
+    }
 
     execute("CREATE TABLE IF NOT EXISTS repeated_tasks ("
             "  generator_id INTEGER PRIMARY KEY REFERENCES projects_tree(id) ON DELETE CASCADE, "
             "  weekday_mask INTEGER NOT NULL, "
             "  count_per_day INTEGER NOT NULL DEFAULT 1, "
             "  last_spawned_date TEXT NOT NULL DEFAULT '');");
+
+    execute("CREATE TABLE IF NOT EXISTS project_colors ("
+            "  project_root_id INTEGER PRIMARY KEY REFERENCES projects_tree(id) ON DELETE CASCADE, "
+            "  color TEXT NOT NULL);");
 }
 
 Database::~Database() {
@@ -48,6 +72,26 @@ Database::~Database() {
 
 std::string_view Database::table_name(TreeType type) const {
     return (type == TreeType::LIFE) ? "life_tree" : "projects_tree";
+}
+
+bool Database::has_column(const std::string& table, const std::string& column) {
+    std::string sql = "PRAGMA table_info(" + table + ");";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return false;
+
+    bool found = false;
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        // table_info's columns are (cid, name, type, notnull, dflt_value, pk) —
+        // name is column index 1.
+        const char* name_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        if (name_ptr && column == name_ptr) {
+            found = true;
+            break;
+        }
+    }
+    sqlite3_finalize(stmt);
+    return found;
 }
 
 void Database::execute(const std::string& sql) {
@@ -168,16 +212,19 @@ void Database::insert_root(TreeType type, std::string_view title) {
     }
 }
 
-void Database::insert_work_log(std::string_view title, std::string_view path, time_t start_time, time_t end_time) {
-    std::string sql = "INSERT INTO work_log (title, path, start_time, end_time) VALUES (?, ?, ?, ?);";
+void Database::insert_work_log(std::string_view title, std::string_view path, std::string_view color, int source_task_id, time_t start_time, time_t end_time) {
+    std::string sql = "INSERT INTO work_log (title, path, color, source_task_id, start_time, end_time, completed_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?, 0);";
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return;
 
     sqlite3_bind_text(stmt, 1, title.data(), static_cast<int>(title.size()), SQLITE_TRANSIENT);
     sqlite3_bind_text(stmt, 2, path.data(), static_cast<int>(path.size()), SQLITE_TRANSIENT);
-    sqlite3_bind_int64(stmt, 3, static_cast<sqlite3_int64>(start_time));
-    sqlite3_bind_int64(stmt, 4, static_cast<sqlite3_int64>(end_time));
+    sqlite3_bind_text(stmt, 3, color.data(), static_cast<int>(color.size()), SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, source_task_id);
+    sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(start_time));
+    sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(end_time));
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
         DB_ERR("[Database] insert_work_log failed for title " << title);
@@ -185,19 +232,23 @@ void Database::insert_work_log(std::string_view title, std::string_view path, ti
     sqlite3_finalize(stmt);
 }
 
-std::vector<WorkLogRow> Database::load_work_log_for_day(time_t day) {
-    std::vector<WorkLogRow> rows;
-
-    // Midnight-to-midnight in local time, computed from the given instant.
+void Database::day_bounds(time_t day, time_t& start, time_t& end) const {
     std::tm tm_buf{};
     localtime_r(&day, &tm_buf);
     tm_buf.tm_hour = 0;
     tm_buf.tm_min = 0;
     tm_buf.tm_sec = 0;
-    time_t day_start = std::mktime(&tm_buf);
-    time_t day_end = day_start + 24 * 60 * 60;
+    start = std::mktime(&tm_buf);
+    end = start + 24 * 60 * 60;
+}
 
-    std::string sql = "SELECT title, path, start_time, end_time FROM work_log "
+std::vector<WorkLogRow> Database::load_work_log_for_day(time_t day) {
+    std::vector<WorkLogRow> rows;
+
+    time_t day_start, day_end;
+    day_bounds(day, day_start, day_end);
+
+    std::string sql = "SELECT title, path, color, source_task_id, start_time, end_time, completed_at FROM work_log "
                        "WHERE start_time >= ? AND start_time < ? ORDER BY start_time ASC;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -209,14 +260,20 @@ std::vector<WorkLogRow> Database::load_work_log_for_day(time_t day) {
     while (sqlite3_step(stmt) == SQLITE_ROW) {
         const char* title_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         const char* path_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
-        time_t start_time = static_cast<time_t>(sqlite3_column_int64(stmt, 2));
-        time_t end_time = static_cast<time_t>(sqlite3_column_int64(stmt, 3));
+        const char* color_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        int source_task_id = sqlite3_column_int(stmt, 3);
+        time_t start_time = static_cast<time_t>(sqlite3_column_int64(stmt, 4));
+        time_t end_time = static_cast<time_t>(sqlite3_column_int64(stmt, 5));
+        time_t completed_at = static_cast<time_t>(sqlite3_column_int64(stmt, 6));
 
         rows.push_back({
             title_ptr ? title_ptr : "",
             path_ptr ? path_ptr : "",
+            color_ptr ? color_ptr : "",
+            source_task_id,
             start_time,
-            end_time
+            end_time,
+            completed_at
         });
     }
     sqlite3_finalize(stmt);
@@ -302,6 +359,133 @@ std::vector<RepeatedTaskRow> Database::load_repeated_tasks() {
         const char* date_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
 
         rows.push_back({ generator_id, weekday_mask, count_per_day, date_ptr ? date_ptr : "" });
+    }
+    sqlite3_finalize(stmt);
+    return rows;
+}
+
+bool Database::set_project_color(int project_root_id, const std::string& color) {
+    std::string sql = "INSERT OR REPLACE INTO project_colors (project_root_id, color) VALUES (?, ?);";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] set_project_color: failed to prepare statement for id " << project_root_id);
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, project_root_id);
+    sqlite3_bind_text(stmt, 2, color.c_str(), static_cast<int>(color.size()), SQLITE_TRANSIENT);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) {
+        DB_ERR("[Database] set_project_color failed for id " << project_root_id);
+    }
+    return ok;
+}
+
+bool Database::clear_project_color(int project_root_id) {
+    std::string sql = "DELETE FROM project_colors WHERE project_root_id = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] clear_project_color: failed to prepare statement for id " << project_root_id);
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, project_root_id);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) {
+        DB_ERR("[Database] clear_project_color failed for id " << project_root_id);
+    }
+    return ok;
+}
+
+std::vector<ProjectColorRow> Database::load_project_colors() {
+    std::vector<ProjectColorRow> rows;
+    std::string sql = "SELECT project_root_id, color FROM project_colors;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return rows;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        int project_root_id = sqlite3_column_int(stmt, 0);
+        const char* color_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        rows.push_back({ project_root_id, color_ptr ? color_ptr : "" });
+    }
+    sqlite3_finalize(stmt);
+    return rows;
+}
+
+bool Database::mark_work_log_completed(int source_task_id, time_t completed_at) {
+    std::string sql = "UPDATE work_log SET completed_at = ? WHERE source_task_id = ? AND completed_at = 0;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] mark_work_log_completed: failed to prepare statement for task " << source_task_id);
+        return false;
+    }
+
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(completed_at));
+    sqlite3_bind_int(stmt, 2, source_task_id);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) {
+        DB_ERR("[Database] mark_work_log_completed failed for task " << source_task_id);
+    }
+    return ok;
+}
+
+std::vector<CompletedTaskSummary> Database::load_completed_tasks_for_day(time_t day) {
+    std::vector<CompletedTaskSummary> rows;
+
+    time_t day_start, day_end;
+    day_bounds(day, day_start, day_end);
+
+    // Grouped by source_task_id, not by title/path — a generator's
+    // spawned instances can share an identical title and path, so
+    // grouping by name would incorrectly merge separate days' instances
+    // of the same habit into one row. title/path/color are taken from
+    // whichever row happens to be picked for the group (MIN(id) just
+    // makes that deterministic) — every segment sharing a source_task_id
+    // was written from the same snapshot anyway, so they're identical
+    // across the group regardless of which one SQLite picks.
+    std::string sql =
+        "SELECT title, path, color, SUM(end_time - start_time) AS total_seconds, MAX(completed_at) AS completed_at "
+        "FROM work_log "
+        // completed_at = 0 (not yet completed) is always outside any
+        // real day's [day_start, day_end) range, so this excludes
+        // still-in-progress segments without needing a separate check.
+        "WHERE completed_at >= ? AND completed_at < ? "
+        "GROUP BY source_task_id "
+        "ORDER BY completed_at ASC;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return rows;
+
+    sqlite3_bind_int64(stmt, 1, static_cast<sqlite3_int64>(day_start));
+    sqlite3_bind_int64(stmt, 2, static_cast<sqlite3_int64>(day_end));
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char* title_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
+        const char* path_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
+        const char* color_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
+        long total_seconds = static_cast<long>(sqlite3_column_int64(stmt, 3));
+        time_t completed_at = static_cast<time_t>(sqlite3_column_int64(stmt, 4));
+
+        rows.push_back({
+            title_ptr ? title_ptr : "",
+            path_ptr ? path_ptr : "",
+            color_ptr ? color_ptr : "",
+            total_seconds,
+            completed_at
+        });
     }
     sqlite3_finalize(stmt);
     return rows;

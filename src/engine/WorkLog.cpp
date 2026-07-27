@@ -15,8 +15,12 @@ void WorkLog::end_active_session() {
     m_end = std::time(nullptr);
 }
 
-void WorkLog::record_completion(std::string_view title, std::string_view path, time_t start, time_t end) {
-    m_db->insert_work_log(title, path, start, end);
+void WorkLog::record_segment(std::string_view title, std::string_view path, std::string_view color, int source_task_id, time_t start, time_t end) {
+    m_db->insert_work_log(title, path, color, source_task_id, start, end);
+}
+
+bool WorkLog::mark_completed(int source_task_id, time_t completed_at) {
+    return m_db->mark_work_log_completed(source_task_id, completed_at);
 }
 
 void WorkLog::clear_session() {
@@ -28,4 +32,8 @@ void WorkLog::clear_session() {
 
 std::vector<WorkLogRow> WorkLog::entries_for_day(time_t day) {
     return m_db->load_work_log_for_day(day);
+}
+
+std::vector<CompletedTaskSummary> WorkLog::entries_for_completed_day(time_t day) {
+    return m_db->load_completed_tasks_for_day(day);
 }

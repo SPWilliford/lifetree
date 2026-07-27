@@ -1,14 +1,21 @@
 #include "view/CardRow.hpp"
 #include <gtkmm/gestureclick.h>
 #include <glibmm/main.h>
+#include <glibmm/markup.h>
 
 CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view)> on_changed)
-    : Gtk::Box(Gtk::Orientation::HORIZONTAL, 12), m_on_changed(on_changed)
+    : Gtk::Box(Gtk::Orientation::HORIZONTAL, 8), m_on_changed(on_changed)
 {
+    // Matches TaskPanel's row spacing/margin (Backlog, Completed Today) —
+    // no reason for the two panels' rows to have drifted to different
+    // arbitrary numbers independently.
+    set_margin(6);
+
     m_marker.set_visible(false);
     append(m_marker);
 
-    m_label.set_text(std::string(initial_text));
+    m_current_text = std::string(initial_text);
+    m_label.set_text(m_current_text);
     m_label.set_halign(Gtk::Align::START);
     m_label.set_hexpand(true);
     append(m_label);
@@ -26,7 +33,8 @@ CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view
                 m_on_changed(updated_text);
             }
 
-            m_label.set_text(updated_text);
+            m_current_text = updated_text;
+            render_label();
             remove(m_editor);
             m_is_editing = false;
             append(m_label);
@@ -40,7 +48,11 @@ CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view
         if (n_press == 2 && !m_is_editing) {
             m_is_editing = true;
             remove(m_label);
-            m_editor.set_text(m_label.get_text());
+            m_editor.set_text(m_current_text); // the authoritative plain text,
+                                                // not m_label.get_text() — same
+                                                // value either way (get_text()
+                                                // already strips markup), but
+                                                // this doesn't lean on that
             m_editor.set_hexpand(true);
             append(m_editor);
 
@@ -59,9 +71,24 @@ CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view
     add_controller(right_click);
 }
 
+void CardRow::render_label() {
+    if (m_current_color.empty()) {
+        m_label.set_text(m_current_text);
+    } else {
+        m_label.set_markup("<span foreground='" + m_current_color + "'>"
+            + Glib::Markup::escape_text(m_current_text) + "</span>");
+    }
+}
+
 void CardRow::set_text(std::string_view text) {
-    m_label.set_text(std::string(text));
+    m_current_text = std::string(text);
+    render_label();
     m_label.queue_resize();
+}
+
+void CardRow::set_color(const std::string& hex_color) {
+    m_current_color = hex_color;
+    render_label();
 }
 
 void CardRow::set_marker(std::string_view emoji) {
