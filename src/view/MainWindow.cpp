@@ -1,10 +1,10 @@
 #include "view/MainWindow.hpp"
-#include "engine/AppEngine.hpp"
+#include "core/App.hpp"
 
-MainWindow::MainWindow(AppEngine& engine)
-    : m_tree_panel(engine.life(), engine.projects(), engine.task_attributes()),
-      m_schedule_panel(engine.projects(), engine.work_log(), engine.task_attributes()),
-      m_task_panel(engine.projects(), engine.work_log(), engine.task_attributes())
+MainWindow::MainWindow(App& app)
+    : m_tree_panel(app.life(), app.projects(), app.task_attributes(), app.priority()),
+      m_schedule_panel(app.projects(), app.work(), app.task_attributes()),
+      m_task_panel(app.projects(), app.work(), app.task_attributes(), app.priority())
 {
     set_title("LifeTree");
     set_default_size(1400, 1000);

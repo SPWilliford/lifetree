@@ -1,8 +1,11 @@
 #include "view/TaskPanel.hpp"
 #include "view/TreePanel.hpp"   // reuses TreeObject, the id-wrapper GObject
-#include "engine/TreeController.hpp"
-#include "engine/WorkLog.hpp"
-#include "engine/TaskAttributes.hpp"
+#include "core/TreeController.hpp"
+#include "core/Work.hpp"
+#include "core/TaskAttributes.hpp"
+#include "core/Priority.hpp"
+#include <algorithm>
+#include <vector>
 #include <pangomm/layout.h>
 #include <glibmm/markup.h>
 #include <gtkmm/singleselection.h>
@@ -44,8 +47,8 @@ namespace {
     }
 }
 
-TaskPanel::TaskPanel(ITreeController& projects, WorkLog& worklog, TaskAttributes& task_attributes)
-    : Gtk::Box(Gtk::Orientation::VERTICAL, 12), m_projects(projects), m_worklog(worklog), m_task_attributes(task_attributes)
+TaskPanel::TaskPanel(TreeController& projects, Work& worklog, TaskAttributes& task_attributes, Priority& priority)
+    : Gtk::Box(Gtk::Orientation::VERTICAL, 12), m_projects(projects), m_work(worklog), m_task_attributes(task_attributes), m_priority(priority)
 {
     initialize_layout();
 
@@ -56,9 +59,19 @@ TaskPanel::TaskPanel(ITreeController& projects, WorkLog& worklog, TaskAttributes
         Glib::signal_idle().connect_once([this]() { refresh(); });
     });
 
-    // Same reason — a color or repeat-status change doesn't touch the
-    // tree structure itself, so m_projects' signal above wouldn't fire
-    // for it, but an already-bound row still needs to pick up the change.
+    // A full rebuild rather than the in-place restyle TreePanel does for
+    // this same signal, because generator status changes this list's
+    // *membership* and not just its appearance — refresh() excludes
+    // generators from the backlog. Marking something repeating on a day
+    // it isn't due spawns no children, so no tree signal fires, and this
+    // is the only notice that the node should leave the list. Cheap here
+    // regardless: a flat list has no expand state to lose.
+    // Associations and weights change the ORDER of this list, not its
+    // membership, but a re-sort still means rebuilding the store.
+    m_priority.connect_changed([this]() {
+        Glib::signal_idle().connect_once([this]() { refresh(); });
+    });
+
     m_task_attributes.connect_changed([this]() {
         Glib::signal_idle().connect_once([this]() { refresh(); });
     });
@@ -158,32 +171,44 @@ void TaskPanel::on_bind(const Glib::RefPtr<Gtk::ListItem>& item) {
     auto* title_label = dynamic_cast<Gtk::Label*>(box->get_last_child());
     if (!path_label || !title_label) return;
 
-    int id = obj->node_id();
-
     // Full path rather than just the immediate parent, matching how
     // Completed Today shows it. ancestor_path() already excludes the
-    // hidden root, so an empty result just means no prefix. If the
-    // immediate parent is a generator, its title is identical to this
-    // instance's own title (that's how spawning works) — showing it
-    // would just duplicate the title, so skip straight to its ancestors.
-    int parent_id = m_projects.parent_of(id);
-    std::string path = m_task_attributes.is_generator(parent_id)
-        ? m_projects.ancestor_path(parent_id)
-        : m_projects.ancestor_path(id);
+    // hidden root, so an empty result just means no prefix.
+    TaskSnapshot snap = m_task_attributes.snapshot(obj->node_id());
 
-    std::string title = m_projects.get_title(id);
-    std::string color = m_task_attributes.get_color(id);
-
-    set_colored_text(*path_label, path.empty() ? "" : path + " - ", color);
-    set_colored_text(*title_label, title, color);
+    set_colored_text(*path_label, snap.path.empty() ? "" : snap.path + " - ", snap.color);
+    set_colored_text(*title_label, snap.title, snap.color);
 }
 
 void TaskPanel::refresh() {
     m_store->remove_all();
+
+    std::vector<int> ids;
     for (int id : m_projects.leaves()) {
         if (m_task_attributes.is_generator(id)) continue; // the generator itself isn't a real task
-        m_store->append(TreeObject::create(id));
+        ids.push_back(id);
     }
+
+    // Ordered by the priority of the project each task belongs to — the
+    // first ordering this list has ever had. Deliberately naive: it ranks
+    // whole projects, and says nothing about which task within a project
+    // to do first, or about recurrence, or capacity. A rough order beats
+    // none, and the scheduler that replaces this wants real inputs to be
+    // designed against.
+    //
+    // stable_sort, so tasks of equal priority keep the order leaves()
+    // produced. Before any associations exist every project sits at zero,
+    // which means this changes nothing until the first link is made.
+    const auto project_values = m_priority.project_priorities();
+    auto priority_of = [&](int task_id) {
+        auto it = project_values.find(m_task_attributes.project_root_of(task_id));
+        return (it != project_values.end()) ? it->second : 0.0;
+    };
+    std::stable_sort(ids.begin(), ids.end(), [&](int a, int b) {
+        return priority_of(a) > priority_of(b);
+    });
+
+    for (int id : ids) m_store->append(TreeObject::create(id));
 }
 
 void TaskPanel::refresh_completed() {
@@ -195,7 +220,7 @@ void TaskPanel::refresh_completed() {
         m_completed_list.remove(*row);
     }
 
-    for (const auto& entry : m_worklog.entries_for_completed_day(std::time(nullptr))) {
+    for (const auto& entry : m_work.entries_for_completed_day(std::time(nullptr))) {
         auto* row_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
         row_box->set_margin(6);
 

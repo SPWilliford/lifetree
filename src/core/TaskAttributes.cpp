@@ -1,5 +1,5 @@
-#include "engine/TaskAttributes.hpp"
-#include "engine/TreeController.hpp"
+#include "core/TaskAttributes.hpp"
+#include "core/TreeController.hpp"
 #include <ctime>
 
 namespace {
@@ -10,7 +10,7 @@ namespace {
     }
 }
 
-TaskAttributes::TaskAttributes(std::shared_ptr<Database> db, ITreeController& projects)
+TaskAttributes::TaskAttributes(std::shared_ptr<Database> db, TreeController& projects)
     : m_db(std::move(db)), m_projects(projects) {}
 
 void TaskAttributes::load() {
@@ -79,11 +79,11 @@ void TaskAttributes::run_spawn_scan() {
     }
 }
 
-std::string TaskAttributes::get_color(int id) const {
-    if (!m_projects.contains(id)) return "";
+int TaskAttributes::project_root_of(int id) const {
+    if (!m_projects.contains(id)) return -1;
 
-    // Walk up until parent is 0 (id is now the top-level project) or -1
-    // (id was already the hidden root itself — no color, nothing to walk).
+    // Walk up until the parent is 0, meaning current sits directly under
+    // the hidden root and is therefore a top-level project.
     int current = id;
     int parent = m_projects.parent_of(current);
     while (parent > 0) {
@@ -91,8 +91,27 @@ std::string TaskAttributes::get_color(int id) const {
         parent = m_projects.parent_of(current);
     }
 
-    auto it = m_project_colors.find(current);
+    // Ending on -1 instead means id was the hidden root itself.
+    return (parent == 0) ? current : -1;
+}
+
+std::string TaskAttributes::get_color(int id) const {
+    auto it = m_project_colors.find(project_root_of(id));
     return (it != m_project_colors.end()) ? it->second : "";
+}
+
+TaskSnapshot TaskAttributes::snapshot(int id) const {
+    if (!m_projects.contains(id)) return {};
+
+    // A generator parent's title is identical to this instance's own, so
+    // including it in the path would just repeat the title — skip to the
+    // generator's own ancestors instead.
+    int parent_id = m_projects.parent_of(id);
+    std::string path = is_generator(parent_id)
+        ? m_projects.ancestor_path(parent_id)
+        : m_projects.ancestor_path(id);
+
+    return { m_projects.get_title(id), path, get_color(id), project_root_of(id) };
 }
 
 void TaskAttributes::set_project_color(int project_root_id, const std::string& color) {

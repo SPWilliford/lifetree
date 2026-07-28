@@ -1,4 +1,4 @@
-#include "engine/Database.hpp"
+#include "core/Database.hpp"
 #include <stdexcept>
 #include <ctime>
 #include <iostream>
@@ -34,6 +34,7 @@ Database::Database(const std::string& path) {
             "  path TEXT NOT NULL, "
             "  color TEXT NOT NULL DEFAULT '', "
             "  source_task_id INTEGER NOT NULL DEFAULT -1, "
+            "  project_root_id INTEGER NOT NULL DEFAULT -1, "
             "  start_time INTEGER NOT NULL, "
             "  end_time INTEGER NOT NULL, "
             "  completed_at INTEGER NOT NULL DEFAULT 0);");
@@ -54,6 +55,13 @@ Database::Database(const std::string& path) {
     if (!has_column("work_log", "completed_at")) {
         execute("ALTER TABLE work_log ADD COLUMN completed_at INTEGER NOT NULL DEFAULT 0;");
     }
+    // Rows written before this column existed keep -1. They can't be
+    // backfilled: the tasks they came from are long deleted, so nothing
+    // remains to walk up to a project root from. Time logged from here on
+    // totals by project; time logged before it stays unattributed.
+    if (!has_column("work_log", "project_root_id")) {
+        execute("ALTER TABLE work_log ADD COLUMN project_root_id INTEGER NOT NULL DEFAULT -1;");
+    }
 
     execute("CREATE TABLE IF NOT EXISTS repeated_tasks ("
             "  generator_id INTEGER PRIMARY KEY REFERENCES projects_tree(id) ON DELETE CASCADE, "
@@ -64,6 +72,19 @@ Database::Database(const std::string& path) {
     execute("CREATE TABLE IF NOT EXISTS project_colors ("
             "  project_root_id INTEGER PRIMARY KEY REFERENCES projects_tree(id) ON DELETE CASCADE, "
             "  color TEXT NOT NULL);");
+
+    execute("CREATE TABLE IF NOT EXISTS life_weights ("
+            "  node_id INTEGER PRIMARY KEY REFERENCES life_tree(id) ON DELETE CASCADE, "
+            "  weight REAL NOT NULL);");
+
+    // Composite key: one weight per project/leaf pair. Cascades from both
+    // sides, so deleting either end removes the association rather than
+    // leaving it pointing at nothing.
+    execute("CREATE TABLE IF NOT EXISTS project_links ("
+            "  project_root_id INTEGER NOT NULL REFERENCES projects_tree(id) ON DELETE CASCADE, "
+            "  leaf_id INTEGER NOT NULL REFERENCES life_tree(id) ON DELETE CASCADE, "
+            "  weight REAL NOT NULL, "
+            "  PRIMARY KEY (project_root_id, leaf_id));");
 }
 
 Database::~Database() {
@@ -212,22 +233,23 @@ void Database::insert_root(TreeType type, std::string_view title) {
     }
 }
 
-void Database::insert_work_log(std::string_view title, std::string_view path, std::string_view color, int source_task_id, time_t start_time, time_t end_time) {
-    std::string sql = "INSERT INTO work_log (title, path, color, source_task_id, start_time, end_time, completed_at) "
-                       "VALUES (?, ?, ?, ?, ?, ?, 0);";
+void Database::insert_work_log(const WorkLogRow& row) {
+    std::string sql = "INSERT INTO work_log (title, path, color, source_task_id, project_root_id, start_time, end_time, completed_at) "
+                       "VALUES (?, ?, ?, ?, ?, ?, ?, 0);";
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return;
 
-    sqlite3_bind_text(stmt, 1, title.data(), static_cast<int>(title.size()), SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 2, path.data(), static_cast<int>(path.size()), SQLITE_TRANSIENT);
-    sqlite3_bind_text(stmt, 3, color.data(), static_cast<int>(color.size()), SQLITE_TRANSIENT);
-    sqlite3_bind_int(stmt, 4, source_task_id);
-    sqlite3_bind_int64(stmt, 5, static_cast<sqlite3_int64>(start_time));
-    sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(end_time));
+    sqlite3_bind_text(stmt, 1, row.title.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 2, row.path.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(stmt, 3, row.color.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(stmt, 4, row.source_task_id);
+    sqlite3_bind_int(stmt, 5, row.project_root_id);
+    sqlite3_bind_int64(stmt, 6, static_cast<sqlite3_int64>(row.start_time));
+    sqlite3_bind_int64(stmt, 7, static_cast<sqlite3_int64>(row.end_time));
 
     if (sqlite3_step(stmt) != SQLITE_DONE) {
-        DB_ERR("[Database] insert_work_log failed for title " << title);
+        DB_ERR("[Database] insert_work_log failed for title " << row.title);
     }
     sqlite3_finalize(stmt);
 }
@@ -248,7 +270,7 @@ std::vector<WorkLogRow> Database::load_work_log_for_day(time_t day) {
     time_t day_start, day_end;
     day_bounds(day, day_start, day_end);
 
-    std::string sql = "SELECT title, path, color, source_task_id, start_time, end_time, completed_at FROM work_log "
+    std::string sql = "SELECT title, path, color, source_task_id, project_root_id, start_time, end_time, completed_at FROM work_log "
                        "WHERE start_time >= ? AND start_time < ? ORDER BY start_time ASC;";
 
     sqlite3_stmt* stmt = nullptr;
@@ -261,19 +283,15 @@ std::vector<WorkLogRow> Database::load_work_log_for_day(time_t day) {
         const char* title_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 0));
         const char* path_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 1));
         const char* color_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 2));
-        int source_task_id = sqlite3_column_int(stmt, 3);
-        time_t start_time = static_cast<time_t>(sqlite3_column_int64(stmt, 4));
-        time_t end_time = static_cast<time_t>(sqlite3_column_int64(stmt, 5));
-        time_t completed_at = static_cast<time_t>(sqlite3_column_int64(stmt, 6));
-
-        rows.push_back({
-            title_ptr ? title_ptr : "",
-            path_ptr ? path_ptr : "",
-            color_ptr ? color_ptr : "",
-            source_task_id,
-            start_time,
-            end_time,
-            completed_at
+        rows.push_back(WorkLogRow{
+            .title = title_ptr ? title_ptr : "",
+            .path = path_ptr ? path_ptr : "",
+            .color = color_ptr ? color_ptr : "",
+            .source_task_id = sqlite3_column_int(stmt, 3),
+            .project_root_id = sqlite3_column_int(stmt, 4),
+            .start_time = static_cast<time_t>(sqlite3_column_int64(stmt, 5)),
+            .end_time = static_cast<time_t>(sqlite3_column_int64(stmt, 6)),
+            .completed_at = static_cast<time_t>(sqlite3_column_int64(stmt, 7))
         });
     }
     sqlite3_finalize(stmt);
@@ -359,6 +377,120 @@ std::vector<RepeatedTaskRow> Database::load_repeated_tasks() {
         const char* date_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
 
         rows.push_back({ generator_id, weekday_mask, count_per_day, date_ptr ? date_ptr : "" });
+    }
+    sqlite3_finalize(stmt);
+    return rows;
+}
+
+bool Database::set_project_link(int project_root_id, int leaf_id, double weight) {
+    std::string sql = "INSERT OR REPLACE INTO project_links (project_root_id, leaf_id, weight) VALUES (?, ?, ?);";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] set_project_link: failed to prepare statement for " << project_root_id << "/" << leaf_id);
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, project_root_id);
+    sqlite3_bind_int(stmt, 2, leaf_id);
+    sqlite3_bind_double(stmt, 3, weight);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) {
+        DB_ERR("[Database] set_project_link failed for " << project_root_id << "/" << leaf_id);
+    }
+    return ok;
+}
+
+bool Database::clear_project_link(int project_root_id, int leaf_id) {
+    std::string sql = "DELETE FROM project_links WHERE project_root_id = ? AND leaf_id = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] clear_project_link: failed to prepare statement for " << project_root_id << "/" << leaf_id);
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, project_root_id);
+    sqlite3_bind_int(stmt, 2, leaf_id);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) {
+        DB_ERR("[Database] clear_project_link failed for " << project_root_id << "/" << leaf_id);
+    }
+    return ok;
+}
+
+std::vector<ProjectLinkRow> Database::load_project_links() {
+    std::vector<ProjectLinkRow> rows;
+    std::string sql = "SELECT project_root_id, leaf_id, weight FROM project_links;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return rows;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        rows.push_back({ sqlite3_column_int(stmt, 0),
+                         sqlite3_column_int(stmt, 1),
+                         sqlite3_column_double(stmt, 2) });
+    }
+    sqlite3_finalize(stmt);
+    return rows;
+}
+
+bool Database::set_life_weight(int node_id, double weight) {
+    std::string sql = "INSERT OR REPLACE INTO life_weights (node_id, weight) VALUES (?, ?);";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] set_life_weight: failed to prepare statement for id " << node_id);
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, node_id);
+    sqlite3_bind_double(stmt, 2, weight);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) {
+        DB_ERR("[Database] set_life_weight failed for id " << node_id);
+    }
+    return ok;
+}
+
+bool Database::clear_life_weight(int node_id) {
+    std::string sql = "DELETE FROM life_weights WHERE node_id = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] clear_life_weight: failed to prepare statement for id " << node_id);
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, node_id);
+
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) {
+        DB_ERR("[Database] clear_life_weight failed for id " << node_id);
+    }
+    return ok;
+}
+
+std::vector<LifeWeightRow> Database::load_life_weights() {
+    std::vector<LifeWeightRow> rows;
+    std::string sql = "SELECT node_id, weight FROM life_weights;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return rows;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        rows.push_back({ sqlite3_column_int(stmt, 0), sqlite3_column_double(stmt, 1) });
     }
     sqlite3_finalize(stmt);
     return rows;

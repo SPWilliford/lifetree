@@ -1,6 +1,6 @@
-#include "engine/AppEngine.hpp"
+#include "core/App.hpp"
 
 int main(int argc, char* argv[]) {
-    AppEngine engine;
-    return engine.run(argc, argv);
+    App app;
+    return app.run(argc, argv);
 }

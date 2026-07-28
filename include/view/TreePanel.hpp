@@ -9,10 +9,12 @@
 #include <gtkmm/treelistmodel.h>
 #include <gtkmm/button.h>
 #include <giomm/liststore.h>
-#include "model/Entities.hpp"
+#include <unordered_map>
+#include "core/Tree.hpp"
 
-class ITreeController;
+class TreeController;
 class TaskAttributes;
+class Priority;
 class CardRow;
 namespace Gtk { class Popover; }
 
@@ -31,9 +33,10 @@ public:
 
 class TreePanel : public Gtk::Box {
 private:
-    ITreeController& m_life;
-    ITreeController& m_projects;
+    TreeController& m_life;
+    TreeController& m_projects;
     TaskAttributes& m_task_attributes;
+    Priority& m_priority;
 
     Glib::RefPtr<Gio::ListStore<Glib::Object>> m_life_root_store;
     Glib::RefPtr<Gio::ListStore<Glib::Object>> m_project_root_store;
@@ -47,6 +50,15 @@ private:
     Gtk::ListView       m_project_view;
     Gtk::Button         m_new_project_button{"New Project"};
 
+    // Rows currently materialized as widgets, by node id — maintained by
+    // the factory's bind/unbind pair. ListView only builds widgets for
+    // visible rows and recycles them, so this is a live view of what's on
+    // screen, not of the whole tree. Lets an attribute change restyle the
+    // affected rows directly instead of going through the model. Separate
+    // per tree because Life and Projects have independent id spaces.
+    std::unordered_map<int, CardRow*> m_life_cards;
+    std::unordered_map<int, CardRow*> m_project_cards;
+
     void initialize_layout();
     void bind_actions();
 
@@ -56,6 +68,17 @@ private:
 
     void on_setup(const Glib::RefPtr<Gtk::ListItem>& item);
     void on_bind(const Glib::RefPtr<Gtk::ListItem>& item, TreeType type);
+    void on_unbind(const Glib::RefPtr<Gtk::ListItem>& item, TreeType type);
+
+    // Everything about a row's appearance that comes from the model.
+    // Shared by on_bind and restyle_bound_rows so a freshly bound row and
+    // a restyled one can't render differently.
+    void apply_row_visuals(CardRow& card, TreeType type, int id);
+
+    // Re-applies the above to every currently-visible row. For changes
+    // that alter how a row looks without altering the tree — a color or a
+    // repeat status — which the tree's own signal never fires for.
+    void restyle_bound_rows(TreeType type);
 
     // Right-click on any row — a small menu (Add child, Delete, and, on
     // the Projects tab only, Make repeating / Stop repeating). "Make
@@ -80,6 +103,18 @@ private:
     // that's what got decided over building a full color-dialog picker.
     Gtk::Widget* build_color_picker(int id, Gtk::Popover* popover);
 
+    // reached via "Supports…" — one checkbox per life tree leaf, toggling
+    // whether this project counts as serving it. No weight control yet:
+    // every association is equal, which makes a leaf split evenly among
+    // whatever serves it. That's a reasonable default, and one fewer thing
+    // to decide before the numbers have been lived with.
+    Gtk::Widget* build_link_picker(int id, Gtk::Popover* popover);
+
+    // reached via "Set weight…" on a life tree node — how much of its
+    // parent's priority it claims. Shows what its siblings have already
+    // taken, because the number only means anything relative to them.
+    Gtk::Widget* build_weight_editor(int id, Gtk::Popover* popover);
+
     void on_new_project_clicked();
 
     // Removes any currently-materialized row whose id no longer exists in
@@ -90,10 +125,11 @@ private:
 
     TreeType active_type() const;
     Glib::RefPtr<Gio::ListStore<Glib::Object>>& root_store(TreeType type);
-    ITreeController& controller_for(TreeType type);
+    TreeController& controller_for(TreeType type);
+    std::unordered_map<int, CardRow*>& cards_for(TreeType type);
 
 public:
-    TreePanel(ITreeController& life, ITreeController& projects, TaskAttributes& task_attributes);
+    TreePanel(TreeController& life, TreeController& projects, TaskAttributes& task_attributes, Priority& priority);
     ~TreePanel() override = default;
 };
 #endif

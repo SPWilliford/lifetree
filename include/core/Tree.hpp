@@ -1,24 +1,31 @@
 #ifndef TREE_HPP
 #define TREE_HPP
+#include <string>
 #include <vector>
 #include <unordered_map>
-#include <stdexcept>
 #include <algorithm>
-template <typename T>
+
+// Which of the two trees. They're the same structure — the distinction is
+// what they mean and which table they persist to.
+enum class TreeType {
+    LIFE,
+    PROJECTS
+};
+
 struct Node {
-    T data;
+    std::string title;
     int parent_id = -1;
     int position = 0;
     std::vector<int> children;
 };
-template <typename T>
+
 class Tree {
 private:
-    std::unordered_map<int, Node<T>> m_nodes;
+    std::unordered_map<int, Node> m_nodes;
 public:
     Tree() = default;
-    const Node<T>& get(int id) const { return m_nodes.at(id); }
-    Node<T>& get_mut(int id) { return m_nodes.at(id); }
+    const Node& get(int id) const { return m_nodes.at(id); }
+    Node& get_mut(int id) { return m_nodes.at(id); }
     bool contains(int id) const { return m_nodes.find(id) != m_nodes.end(); }
 
     // One greater than the highest position among parent_id's current
@@ -45,33 +52,38 @@ public:
         return leaves;
     }
 
-    // Rebuilds the memory tree effortlessly from relational database rows
-    void load(const auto& rows, auto&& mapper) {
+    // Rebuilds the tree from database rows. Templated on the container
+    // rather than including Database.hpp, so this stays a plain data
+    // structure with no dependency on the storage layer — rows just need
+    // to expose id, parent_id, position, and title.
+    void load(const auto& rows) {
         m_nodes.clear();
-        
-        // Pass 1: Allocate nodes into the map lookup cache
+
+        // Pass 1: allocate every node
         for (const auto& r : rows) {
-            m_nodes[r.id] = Node<T>{ mapper(r), r.parent_id, r.position, {} };
+            m_nodes[r.id] = Node{ r.title, r.parent_id, r.position, {} };
         }
-        // Pass 2: Establish the parent-to-child relationship links
+        // Pass 2: link parents to their children
         for (const auto& [id, node] : m_nodes) {
             if (node.parent_id != -1 && contains(node.parent_id)) {
                 m_nodes[node.parent_id].children.push_back(id);
             }
         }
-        // Pass 3: Sort child vectors so they perfectly match custom positions
+        // Pass 3: sort each child list into stored position order
         for (auto& [id, node] : m_nodes) {
             std::sort(node.children.begin(), node.children.end(), [this](int a, int b) {
                 return m_nodes[a].position < m_nodes[b].position;
             });
         }
     }
-    void add(int id, int parent_id, int position, T data) {
-        m_nodes[id] = Node<T>{ std::move(data), parent_id, position, {} };
+
+    void add(int id, int parent_id, int position, std::string title) {
+        m_nodes[id] = Node{ std::move(title), parent_id, position, {} };
         if (parent_id != -1 && contains(parent_id)) {
             m_nodes[parent_id].children.push_back(id);
         }
     }
+
     void remove(int id) {
         if (m_nodes.find(id) == m_nodes.end()) return;
         int p_id = m_nodes[id].parent_id;

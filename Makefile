@@ -5,8 +5,8 @@ TARGET = lifetree_app
 
 BUILD_DIR = build
 
-# Scans your engine, view, and main entries cleanly
-SRCS = $(strip $(shell find src/engine src/view -name "*.cpp" 2>/dev/null) src/main.cpp)
+# Scans your core, view, and main entries cleanly
+SRCS = $(strip $(shell find src/core src/view -name "*.cpp" 2>/dev/null) src/main.cpp)
 OBJS = $(patsubst %.cpp, $(BUILD_DIR)/%.o, $(SRCS))
 
 all: $(TARGET)

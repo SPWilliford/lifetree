@@ -1,11 +1,31 @@
 #ifndef TASKATTRIBUTES_HPP
 #define TASKATTRIBUTES_HPP
 #include <memory>
+#include <string>
 #include <unordered_map>
 #include <sigc++/signal.h>
-#include "engine/Database.hpp"
+#include "core/Database.hpp"
 
-class ITreeController;
+class TreeController;
+
+// A point-in-time copy of everything display and history need to know
+// about a task. Deliberately a value, not a reference to a live node:
+// it stays valid and correct after the node itself is edited or deleted,
+// which is what lets worked time be recorded for a task that no longer
+// exists. Empty title means "no such task."
+struct TaskSnapshot {
+    std::string title;
+    std::string path;
+    std::string color;
+
+    // Which top-level project this task belongs to. Captured here rather
+    // than looked up later because that lookup needs the node to still
+    // exist — and the whole point of a snapshot is to outlive it. This is
+    // the only durable key tying recorded time back to a project: title
+    // and path are display text, and source_task_id dangles once the task
+    // is completed and removed. -1 when there's no project root.
+    int project_root_id = -1;
+};
 
 // Home for optional things a task can have beyond its title — started
 // with repeating (repeated_tasks), now also project_colors, rather than
@@ -19,7 +39,7 @@ class ITreeController;
 // clear all of them before respawning, no extra bookkeeping needed.
 class TaskAttributes {
 public:
-    TaskAttributes(std::shared_ptr<Database> db, ITreeController& projects);
+    TaskAttributes(std::shared_ptr<Database> db, TreeController& projects);
 
     // Pulls every repeated_tasks row into the in-memory cache. Call once
     // at startup, after the projects tree itself has loaded.
@@ -41,6 +61,12 @@ public:
     // spawned today.
     void run_spawn_scan();
 
+    // The top-level project a node belongs to — the ancestor sitting
+    // directly under the hidden root. Returns -1 if id doesn't exist, or
+    // if id IS the hidden root, which isn't a project and has nothing to
+    // attribute to. Colors, and now recorded time, both hang off this.
+    int project_root_of(int id) const;
+
     // Colors are set on a top-level project only, and inherited by
     // walking up to find it — a leaf never stores its own copy. Returns
     // "" if id's project (or id itself, if id doesn't exist) has none set.
@@ -52,6 +78,15 @@ public:
     void set_project_color(int project_root_id, const std::string& color);
     void clear_project_color(int project_root_id);
 
+    // Everything about a task worth copying out of the tree, in one go.
+    // Lives here rather than in each panel because the path rule is
+    // generator semantics, not a display detail: an instance's immediate
+    // parent, if it's a generator, has an identical title (that's how
+    // spawning works), so showing it would just duplicate the title —
+    // the path skips straight to that generator's own ancestors instead.
+    // Was independently reimplemented in two view files before.
+    TaskSnapshot snapshot(int id) const;
+
     // Fires after anything above that changes what a row should display —
     // a color or a repeat status. Panels use this to know when an
     // already-bound, already-visible row needs to be re-rendered, since
@@ -60,7 +95,7 @@ public:
 
 private:
     std::shared_ptr<Database> m_db;
-    ITreeController& m_projects;
+    TreeController& m_projects;
     std::unordered_map<int, RepeatedTaskRow> m_generators;
     std::unordered_map<int, std::string> m_project_colors;
     sigc::signal<void()> m_changed;

@@ -1,13 +1,17 @@
 #include "view/TreePanel.hpp"
 #include "view/CardRow.hpp"
-#include "engine/TreeController.hpp"
-#include "engine/TaskAttributes.hpp"
+#include "core/TreeController.hpp"
+#include "core/TaskAttributes.hpp"
+#include "core/Priority.hpp"
 #include <gtkmm/singleselection.h>
 #include <gtkmm/signallistitemfactory.h>
 #include <gtkmm/treeexpander.h>
 #include <gtkmm/popover.h>
 #include <gtkmm/togglebutton.h>
 #include <gtkmm/spinbutton.h>
+#include <gtkmm/checkbutton.h>
+#include <gtkmm/scrolledwindow.h>
+#include <gtkmm/label.h>
 #include <gtkmm/adjustment.h>
 #include <glibmm/main.h>
 #include <algorithm>
@@ -15,6 +19,7 @@
 #include <utility>
 #include <array>
 #include <iostream>
+#include <cstdio>
 
 // Flip to 1 while debugging factory binds; 0 for normal use.
 #define TREEPANEL_DEBUG 0
@@ -24,8 +29,8 @@
 #define TP_LOG(x)
 #endif
 
-TreePanel::TreePanel(ITreeController& life, ITreeController& projects, TaskAttributes& task_attributes)
-    : Gtk::Box(Gtk::Orientation::VERTICAL, 12), m_life(life), m_projects(projects), m_task_attributes(task_attributes)
+TreePanel::TreePanel(TreeController& life, TreeController& projects, TaskAttributes& task_attributes, Priority& priority)
+    : Gtk::Box(Gtk::Orientation::VERTICAL, 12), m_life(life), m_projects(projects), m_task_attributes(task_attributes), m_priority(priority)
 {
     initialize_layout();
     bind_actions();
@@ -41,37 +46,29 @@ TreePanel::TreePanel(ITreeController& life, ITreeController& projects, TaskAttri
         Glib::signal_idle().connect_once([this]() { prune_missing(TreeType::PROJECTS); });
     });
 
-    // Colors and repeat status don't touch the tree structure itself, so
-    // m_projects' own signal above never fires for them — an
-    // already-bound, already-visible row otherwise has no way to know it
-    // needs to re-render. Gio::ListModel::items_changed() would be the
-    // direct way to say "these items changed, re-fetch and re-bind them,"
-    // but it's protected — only a model's own implementation can call it.
-    // Achieving the same thing through the public API instead: capture
-    // the current top-level ids, then remove and re-append them, which
-    // triggers the same signal internally via Gio::ListStore's own public
-    // mutation methods. Honest tradeoff either way: it resets expand
-    // state for whatever's currently open, since GTK treats a changed
-    // item as effectively new. Colors/repeating are both Projects-only
-    // concepts, so only that store needs this — Life never changes
-    // because of this signal.
+    // Colors and repeat status change how a row looks without touching
+    // the tree, so m_projects' signal above never fires for them and an
+    // already-bound row has no way to know it should re-render.
+    //
+    // Restyling the visible widgets directly rather than poking the
+    // model, because Gio::ListStore offers no public "these items
+    // changed" call — items_changed() is protected, so through the public
+    // API the only way to signal one is to remove and re-append, and GTK
+    // then treats the re-appended items as new and collapses whatever the
+    // user had expanded.
+    //
+    // Projects only: colors and repeating are both Projects concepts. Row
+    // *membership* never changes here either, since this panel shows every
+    // node rather than filtering any out — unlike TaskPanel, whose
+    // backlog excludes generators and so does need a full rebuild.
+    // A weight change moves every priority in the tree, not just the one
+    // edited — the whole cascade shifts, so restyle all visible life rows.
+    m_priority.connect_changed([this]() {
+        Glib::signal_idle().connect_once([this]() { restyle_bound_rows(TreeType::LIFE); });
+    });
+
     m_task_attributes.connect_changed([this]() {
-        Glib::signal_idle().connect_once([this]() {
-            if (!m_project_root_store) return;
-
-            auto n = m_project_root_store->get_n_items();
-            std::vector<int> ids;
-            ids.reserve(n);
-            for (unsigned int i = 0; i < n; ++i) {
-                auto obj = std::dynamic_pointer_cast<TreeObject>(m_project_root_store->get_item(i));
-                if (obj) ids.push_back(obj->node_id());
-            }
-
-            m_project_root_store->remove_all();
-            for (int id : ids) {
-                m_project_root_store->append(TreeObject::create(id));
-            }
-        });
+        Glib::signal_idle().connect_once([this]() { restyle_bound_rows(TreeType::PROJECTS); });
     });
 }
 
@@ -142,8 +139,12 @@ Glib::RefPtr<Gio::ListStore<Glib::Object>>& TreePanel::root_store(TreeType type)
     return (type == TreeType::LIFE) ? m_life_root_store : m_project_root_store;
 }
 
-ITreeController& TreePanel::controller_for(TreeType type) {
+TreeController& TreePanel::controller_for(TreeType type) {
     return (type == TreeType::LIFE) ? m_life : m_projects;
+}
+
+std::unordered_map<int, CardRow*>& TreePanel::cards_for(TreeType type) {
+    return (type == TreeType::LIFE) ? m_life_cards : m_project_cards;
 }
 
 // ---------------------------------------------------------------------
@@ -193,6 +194,7 @@ void TreePanel::setup_factory(Gtk::ListView& view, TreeType type) {
     auto factory = Gtk::SignalListItemFactory::create();
     factory->signal_setup().connect(sigc::mem_fun(*this, &TreePanel::on_setup));
     factory->signal_bind().connect(sigc::bind(sigc::mem_fun(*this, &TreePanel::on_bind), type));
+    factory->signal_unbind().connect(sigc::bind(sigc::mem_fun(*this, &TreePanel::on_unbind), type));
     view.set_factory(factory);
 }
 
@@ -250,21 +252,75 @@ void TreePanel::on_bind(const Glib::RefPtr<Gtk::ListItem>& item, TreeType type) 
     auto* card = dynamic_cast<CardRow*>(expander->get_child());
     if (!card) return;
 
-    auto title = controller_for(type).get_title(obj->node_id());
-    if (title.empty() && obj->node_id() == 0) {
+    cards_for(type)[obj->node_id()] = card;
+    apply_row_visuals(*card, type, obj->node_id());
+}
+
+void TreePanel::on_unbind(const Glib::RefPtr<Gtk::ListItem>& item, TreeType type) {
+    if (!item) return;
+
+    auto* expander = dynamic_cast<Gtk::TreeExpander*>(item->get_child());
+    if (!expander) return;
+
+    auto* card = dynamic_cast<CardRow*>(expander->get_child());
+    if (!card) return;
+
+    auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(item->get_item());
+    if (!row) return;
+
+    auto obj = std::dynamic_pointer_cast<TreeObject>(row->get_item());
+    if (!obj) return;
+
+    // Only drop the entry if it still points at *this* widget. Row
+    // widgets get recycled, so a late unbind must not evict a mapping
+    // that a newer bind has already installed for the same id.
+    auto& cards = cards_for(type);
+    auto it = cards.find(obj->node_id());
+    if (it != cards.end() && it->second == card) {
+        cards.erase(it);
+    }
+}
+
+void TreePanel::apply_row_visuals(CardRow& card, TreeType type, int id) {
+    auto title = controller_for(type).get_title(id);
+    if (title.empty() && id == 0) {
         title = (type == TreeType::LIFE) ? "Live a Good Life" : "Master Project Root";
     }
-    card->set_text(title);
+    card.set_text(title);
 
-    // is_generator() is only meaningful for Projects-tree ids — Life and
-    // Projects each have their own independent id space, so checking it
-    // against a Life node would be a coincidental, meaningless lookup.
-    bool is_generator = (type == TreeType::PROJECTS) && m_task_attributes.is_generator(obj->node_id());
-    card->set_marker(is_generator ? "🔁" : "");
+    if (type == TreeType::PROJECTS) {
+        // Both lookups walk the Projects tree, and the two trees have
+        // independent id spaces — running either against a Life node would
+        // be a coincidental, meaningless hit.
+        card.set_marker(m_task_attributes.is_generator(id) ? "🔁" : "");
+        card.set_color(m_task_attributes.get_color(id));
+        return;
+    }
 
-    // Same reasoning as is_generator above — get_color() walks the
-    // Projects tree specifically, so it's only meaningful there.
-    card->set_color(type == TreeType::PROJECTS ? m_task_attributes.get_color(obj->node_id()) : "");
+    // Life rows carry their resulting priority, so the split is legible at
+    // a glance instead of only inside the weight editor. Recomputes the
+    // cascade per row, which is a full walk of a tree with a handful of
+    // nodes — cheaper than a cache that could go stale.
+    const auto values = m_priority.priorities();
+    auto it = values.find(id);
+    if (it == values.end()) {
+        card.set_marker("");
+    } else {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%.1f%%", it->second);
+        card.set_marker(buf);
+    }
+    card.set_color("");
+}
+
+void TreePanel::restyle_bound_rows(TreeType type) {
+    auto& controller = controller_for(type);
+    for (auto& [id, card] : cards_for(type)) {
+        // A row whose node is already gone is about to be dropped by
+        // prune_missing — don't blank its text in the meantime.
+        if (!controller.contains(id)) continue;
+        apply_row_visuals(*card, type, id);
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -336,6 +392,26 @@ void TreePanel::show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow
         }
     }
 
+    // Weights are a life tree concept, and never on the root: the root
+    // holds the whole 100 by definition, there's nothing to take a share of.
+    if (type == TreeType::LIFE && id > 0) {
+        auto* weight_button = Gtk::make_managed<Gtk::Button>("Set weight…");
+        weight_button->signal_clicked().connect([this, id, popover]() {
+            popover->set_child(*build_weight_editor(id, popover));
+        });
+        menu_box->append(*weight_button);
+    }
+
+    // Associations hang off a whole project, same as colors — a task
+    // doesn't serve a life goal on its own, the project it belongs to does.
+    if (type == TreeType::PROJECTS && id > 0 && m_projects.parent_of(id) == 0) {
+        auto* supports_button = Gtk::make_managed<Gtk::Button>("Supports…");
+        supports_button->signal_clicked().connect([this, id, popover]() {
+            popover->set_child(*build_link_picker(id, popover));
+        });
+        menu_box->append(*supports_button);
+    }
+
     // Colors apply to a whole project, not an arbitrary node within it —
     // only offered on a top-level project (parent is the hidden root).
     if (type == TreeType::PROJECTS && id > 0 && m_projects.parent_of(id) == 0) {
@@ -397,6 +473,128 @@ Gtk::Widget* TreePanel::build_repeat_config(int id, Gtk::Popover* popover) {
         });
     });
     box->append(*apply_button);
+
+    return box;
+}
+
+Gtk::Widget* TreePanel::build_weight_editor(int id, Gtk::Popover* popover) {
+    auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
+    box->set_margin(10);
+
+    // What this node's siblings have already claimed. A weight is a share
+    // of the parent, so the figure is meaningless without knowing what's
+    // left — 30 is generous among two siblings and stingy among ten.
+    const int parent = m_life.parent_of(id);
+    double claimed = 0.0;
+    int unweighted = 0;
+    for (int sibling : m_life.children_of(parent)) {
+        if (sibling == id) continue;
+        if (m_priority.has_weight(sibling)) claimed += m_priority.weight_of(sibling);
+        else ++unweighted;
+    }
+
+    char summary[160];
+    std::snprintf(summary, sizeof(summary),
+                  "Siblings claim %.0f of 100.%s",
+                  claimed,
+                  unweighted > 0 ? " The rest is shared by the unweighted ones." : "");
+    auto* context_label = Gtk::make_managed<Gtk::Label>(summary);
+    context_label->add_css_class("dim-label");
+    context_label->set_halign(Gtk::Align::START);
+    context_label->set_wrap(true);
+    context_label->set_max_width_chars(32);
+    box->append(*context_label);
+
+    // Starts at the current weight, or at an even share of what's left if
+    // this node has never been weighted — so opening the editor and hitting
+    // Apply changes nothing, rather than silently snapping to zero.
+    const double starting = m_priority.has_weight(id)
+        ? m_priority.weight_of(id)
+        : (unweighted > 0 ? (100.0 - claimed) / (unweighted + 1) : 100.0 - claimed);
+
+    auto adjustment = Gtk::Adjustment::create(starting, 0.0, 100.0, 5.0);
+    auto* weight_spin = Gtk::make_managed<Gtk::SpinButton>(adjustment);
+    weight_spin->set_digits(0);
+    box->append(*weight_spin);
+
+    auto* apply_button = Gtk::make_managed<Gtk::Button>("Apply");
+    apply_button->signal_clicked().connect([this, id, weight_spin, popover]() {
+        const double value = weight_spin->get_value();
+        popover->popdown();
+        // Read the value before deferring — weight_spin lives inside this
+        // popover, which is on its way out by the time the idle runs.
+        Glib::signal_idle().connect_once([this, id, value]() {
+            m_priority.set_weight(id, value);
+        });
+    });
+    box->append(*apply_button);
+
+    if (m_priority.has_weight(id)) {
+        // Not the same as setting zero: cleared means "share the remainder
+        // with my unweighted siblings", zero means "claim nothing".
+        auto* clear_button = Gtk::make_managed<Gtk::Button>("Clear weight");
+        clear_button->signal_clicked().connect([this, id, popover]() {
+            popover->popdown();
+            Glib::signal_idle().connect_once([this, id]() {
+                m_priority.clear_weight(id);
+            });
+        });
+        box->append(*clear_button);
+    }
+
+    return box;
+}
+
+Gtk::Widget* TreePanel::build_link_picker(int id, Gtk::Popover* popover) {
+    auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
+    box->set_margin(6);
+
+    auto* heading = Gtk::make_managed<Gtk::Label>("Which life goals does this serve?");
+    heading->add_css_class("dim-label");
+    heading->set_halign(Gtk::Align::START);
+    box->append(*heading);
+
+    auto* list = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
+
+    // Leaves only. An interior life node's priority belongs to its
+    // children, so linking to one would double-count — Priority ignores
+    // such links, and offering them here would be offering a no-op.
+    std::vector<int> leaves = m_life.leaves();
+    if (leaves.empty()) {
+        auto* empty = Gtk::make_managed<Gtk::Label>("No life goals defined yet.");
+        empty->add_css_class("dim-label");
+        list->append(*empty);
+    }
+
+    for (int leaf : leaves) {
+        std::string path = m_life.ancestor_path(leaf);
+        std::string label = path.empty() ? m_life.get_title(leaf)
+                                         : path + " > " + m_life.get_title(leaf);
+
+        auto* check = Gtk::make_managed<Gtk::CheckButton>(label);
+        check->set_active(m_priority.has_link(id, leaf));
+        check->signal_toggled().connect([this, id, leaf, check]() {
+            // Weight 1.0 for every association. The leaf divides its own
+            // share evenly among whatever serves it, which is the honest
+            // reading until there's a reason to say one matters more.
+            if (check->get_active()) m_priority.set_link(id, leaf, 1.0);
+            else                     m_priority.clear_link(id, leaf);
+        });
+        list->append(*check);
+    }
+
+    // Grows to fit a short list, scrolls once the life tree gets big
+    // enough that the popover would run off the screen.
+    auto* scroller = Gtk::make_managed<Gtk::ScrolledWindow>();
+    scroller->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    scroller->set_propagate_natural_height(true);
+    scroller->set_max_content_height(320);
+    scroller->set_child(*list);
+    box->append(*scroller);
+
+    auto* done_button = Gtk::make_managed<Gtk::Button>("Done");
+    done_button->signal_clicked().connect([popover]() { popover->popdown(); });
+    box->append(*done_button);
 
     return box;
 }

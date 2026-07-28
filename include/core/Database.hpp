@@ -6,7 +6,7 @@
 #include <ctime>
 #include <vector>
 #include <string_view>
-#include "model/Entities.hpp"
+#include "core/Tree.hpp"
 
 struct Row {
     int id;
@@ -30,6 +30,15 @@ struct WorkLogRow {
     std::string path;
     std::string color;
     int source_task_id;
+
+    // The top-level project this time belongs to, captured when the
+    // segment was written. The only column that survives well enough to
+    // total time by project: title and path are display snapshots that a
+    // rename invalidates, and source_task_id points at a row that
+    // completing the task deletes. -1 on rows written before this column
+    // existed, and on time that had no project root.
+    int project_root_id;
+
     time_t start_time;
     time_t end_time;
     time_t completed_at;
@@ -66,6 +75,25 @@ struct ProjectColorRow {
     std::string color;
 };
 
+// An explicit weight the user placed on a life tree node: how much of its
+// parent's priority it takes, on a 0..100 scale. Sparse on purpose — a row
+// exists only where the user actually made a choice, and nodes without one
+// share out whatever their weighted siblings left over. See Priority.
+struct LifeWeightRow {
+    int node_id;
+    double weight;
+};
+
+// An association between a top-level project and a life tree leaf it
+// serves, with a rough weight for how much of that project is really about
+// that leaf. Many-to-many: a project can serve several leaves, and a leaf
+// can be served by several projects. See Priority.
+struct ProjectLinkRow {
+    int project_root_id;
+    int leaf_id;
+    double weight;
+};
+
 class Database {
 private:
     sqlite3* m_db = nullptr;
@@ -98,7 +126,12 @@ public:
     // step (mark_work_log_completed), not part of recording a segment.
     // A segment gets written here every time one ends, whether that's a
     // pause or the final one right before Complete.
-    void insert_work_log(std::string_view title, std::string_view path, std::string_view color, int source_task_id, time_t start_time, time_t end_time);
+    // Takes the whole row rather than a list of loose arguments — half of
+    // them are ints that would sit adjacent and interchangeable in a
+    // signature (source_task_id, project_root_id), which is the kind of
+    // swap a compiler can't catch. row.completed_at is ignored: a segment
+    // is always written open and stamped later by mark_work_log_completed.
+    void insert_work_log(const WorkLogRow& row);
     // day: any time_t within the target day (local time) — the day's
     // midnight-to-midnight boundaries are computed from it. Returns
     // every segment for the day regardless of completion status — bands
@@ -130,6 +163,14 @@ public:
 
     // INSERT OR REPLACE — same idempotent-update pattern as
     // insert_repeated_task above.
+    bool set_project_link(int project_root_id, int leaf_id, double weight);
+    bool clear_project_link(int project_root_id, int leaf_id);
+    std::vector<ProjectLinkRow> load_project_links();
+
+    bool set_life_weight(int node_id, double weight);
+    bool clear_life_weight(int node_id);
+    std::vector<LifeWeightRow> load_life_weights();
+
     bool set_project_color(int project_root_id, const std::string& color);
     bool clear_project_color(int project_root_id);
     std::vector<ProjectColorRow> load_project_colors();

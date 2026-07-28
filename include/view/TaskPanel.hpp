@@ -12,15 +12,17 @@
 #include <giomm/liststore.h>
 #include <sigc++/sigc++.h>
 
-class ITreeController;
-class WorkLog;
+class TreeController;
+class Work;
 class TaskAttributes;
+class Priority;
 
 class TaskPanel : public Gtk::Box {
 private:
-    ITreeController& m_projects;
-    WorkLog& m_worklog;
+    TreeController& m_projects;
+    Work& m_work;
     TaskAttributes& m_task_attributes;
+    Priority& m_priority;
 
     Glib::RefPtr<Gio::ListStore<Glib::Object>> m_store;
 
@@ -49,7 +51,7 @@ private:
     void refresh_completed();
 
 public:
-    TaskPanel(ITreeController& projects, WorkLog& worklog, TaskAttributes& task_attributes);
+    TaskPanel(TreeController& projects, Work& worklog, TaskAttributes& task_attributes, Priority& priority);
     ~TaskPanel() override = default;
 
     // Rebuilds the list from the current set of leaf nodes. Called

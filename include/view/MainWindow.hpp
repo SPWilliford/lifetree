@@ -6,7 +6,7 @@
 #include "view/TreePanel.hpp"
 #include "view/TaskPanel.hpp"
 #include "view/SchedulePanel.hpp"
-class AppEngine;
+class App;
 class MainWindow : public Gtk::Window {
 private:
     Gtk::HeaderBar m_header_bar;
@@ -22,7 +22,7 @@ private:
     SchedulePanel  m_schedule_panel;
     TaskPanel      m_task_panel;
 public:
-    explicit MainWindow(AppEngine& engine);
+    explicit MainWindow(App& app);
     ~MainWindow() override = default;
 };
 #endif
