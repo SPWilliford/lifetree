@@ -27,53 +27,27 @@ namespace {
     // value to nudge rather than an exact one.
     constexpr double CLOCK_CENTER_X = 170.0;
 
-    // Space kept clear on the left for the tick labels and the clock flag.
-    // The dock is never allowed to reach back into it, so the two can't
-    // collide however the panel is resized.
+    // Space kept clear on the left for the tick marks and their hour
+    // labels. Bands never reach back into it, so the two can't collide
+    // however the panel is resized.
     constexpr double LEFT_GUTTER = 300.0;
 
-    // The dock grows with the panel instead of sitting at one fixed width,
-    // so a wide window gets wide bands and a readable label rather than an
-    // ellipsis with empty space beside it. Bounded at both ends: too narrow
-    // and the label is useless, too wide and the bands dominate a timeline
-    // that's mostly meant to be read as time.
-    constexpr double DOCK_WIDTH_FRACTION = 0.5;
-    constexpr double DOCK_MIN_WIDTH = 260.0;
-    constexpr double DOCK_MAX_WIDTH = 720.0;
+    // Bands grow with the panel rather than sitting at one fixed width,
+    // bounded at both ends: too narrow and they're hard to read, too wide
+    // and they dominate a timeline that's mostly meant to be read as time.
+    constexpr double BAND_WIDTH_FRACTION = 0.45;
+    constexpr double BAND_MIN_WIDTH = 200.0;
+    constexpr double BAND_MAX_WIDTH = 600.0;
 
     // Shared between the Cairo geometry below and m_staged_box's GTK
     // alignment (see initialize_layout), so the drawn band and the real
     // widgets anchor to the same reference point.
     constexpr double BAND_RIGHT_MARGIN = 20.0;
 
-    // How far above the now-line the staged-task box (buttons + label)
-    // rests, rather than sitting flush against it. Lowering this by one
-    // drops the entire dock — widgets, frame, and label border alike — by
-    // one pixel, since all of them derive from the paired
-    // dock_margin_bottom / dock_content_bottom_y below.
-    constexpr int STAGED_BOX_GAP_ABOVE_LINE = 10;
-
-    // Padding around the staged-task box's content (buttons + label),
-    // inside its drawn border. Top and bottom are separate because the
-    // frame's BOTTOM edge is aligned to the now-line and must stay put:
-    // only the top pad may change to give the content more room. Shared
-    // between draw_dock_frame and initialize_layout, which sizes
-    // m_now_layer tall enough not to clip the frame.
-    constexpr double TASK_BOX_PAD_X = 18.0;
-    constexpr double TASK_BOX_PAD_TOP = 14.0;
-    constexpr double TASK_BOX_PAD_BOTTOM = 8.0; // pinned — sets where the frame meets the line
-
-    // Padding around the label's own text, inside its recess. Same
-    // top/bottom split and the same reason. PAD_X must stay below
-    // TASK_BOX_PAD_X or the recess would escape the dock frame around it.
-    constexpr double LABEL_BORDER_PAD_X = 12.0;
-    constexpr double LABEL_BORDER_PAD_TOP = 8.0;
-    constexpr double LABEL_BORDER_PAD_BOTTOM = 4.0; // pinned, as above
-
-    // Space between the button row and the label below it. Must clear the
-    // label border's top stroke, which reaches LABEL_BORDER_PAD_TOP plus
-    // half a stroke above the label — otherwise the two overlap.
-    constexpr int BUTTONS_LABEL_GAP = 12;
+    // Between the dock's bottom edge and the timeline's top. Enough to read
+    // as two separate framed areas rather than one box with a line across
+    // it, which is what adjacent borders would look like.
+    constexpr int DOCK_TIMELINE_GAP = 8;
 
     constexpr double BG_R = 0.13, BG_G = 0.13, BG_B = 0.15;             // dark background — timeline, clock box, task dock
     constexpr double GOLD_R = 0.95, GOLD_G = 0.75, GOLD_B = 0.2;        // the "now" accent — line, both borders
@@ -83,14 +57,6 @@ namespace {
     // the staged label's border, so that border reads as part of the same
     // neutral furniture as the time markers rather than as another accent
     // competing with the gold.
-    // The dock's interior. Deliberately lighter than BG so the dock reads
-    // as a solid panel resting ON the timeline rather than a window cut
-    // through it — closer to the window grey behind the whole schedule
-    // than to the timeline's own dark. Sampled by eye, not from the theme
-    // (GTK4 has no clean public API for a widget's background color), so
-    // nudge it until it sits right against your actual theme.
-    constexpr double DOCK_FILL_R = 0.18, DOCK_FILL_G = 0.18, DOCK_FILL_B = 0.19;
-
     constexpr double TICK_HOUR_R = 0.85, TICK_HOUR_G = 0.85, TICK_HOUR_B = 0.9;
     constexpr double TICK_HALF_R = 0.6, TICK_HALF_G = 0.6, TICK_HALF_B = 0.65;
     constexpr double TICK_QUARTER_R = 0.4, TICK_QUARTER_G = 0.4, TICK_QUARTER_B = 0.45;
@@ -181,39 +147,27 @@ namespace {
         }
     };
 
-    // The vertical strip shared by every band and by the staged-task dock,
-    // right-anchored against the panel's edge. dock_width comes from the
-    // dock widget's actual allocation — see SchedulePanel::dock_width() —
-    // never from the policy below, so the drawn band is by construction the
-    // same width as the label that appears to be printing it.
+    // The vertical strip every band is drawn in, right-anchored against
+    // the panel's edge.
+    //
+    // A pure function of the panel's width now. It used to read the dock
+    // widget's actual allocation, because the dock sat directly above the
+    // bands and any disagreement between the two was visible; with the dock
+    // moved out of the timeline there is nothing left to agree with, so the
+    // policy can simply be applied where it's needed.
     struct BandColumn {
         double x;
         double width;
         double center() const { return x + width / 2.0; }
     };
 
-    BandColumn band_column(int panel_width, double dock_width) {
-        return { panel_width - BAND_RIGHT_MARGIN - dock_width, dock_width };
-    }
-
-    // How wide the dock *should* be at a given panel width. The single home
-    // for that policy — and deliberately the only thing that consults it is
-    // the margin that drives the widget. Nothing drawn is derived from this;
-    // drawing follows the resulting allocation instead. That's what keeps
-    // the band and the real widgets in agreement even during a drag, when a
-    // freshly computed width and an already-allocated one would differ.
-    double dock_width_for(int panel_width) {
-        const double wanted = panel_width * DOCK_WIDTH_FRACTION;
+    BandColumn band_column(int panel_width) {
+        const double wanted = panel_width * BAND_WIDTH_FRACTION;
         const double room = panel_width - BAND_RIGHT_MARGIN - LEFT_GUTTER;
-        // min() keeps the dock out of the clock's gutter; max() stops it
+        // min() keeps bands clear of the tick labels; max() stops them
         // collapsing when the panel is too narrow to honour both.
-        return std::max(DOCK_MIN_WIDTH, std::min({ wanted, room, DOCK_MAX_WIDTH }));
-    }
-
-    // Left margin that produces that width, given the dock is FILL-aligned
-    // and pinned to the right edge by BAND_RIGHT_MARGIN.
-    int dock_left_margin(int panel_width) {
-        return static_cast<int>(panel_width - BAND_RIGHT_MARGIN - dock_width_for(panel_width));
+        const double width = std::max(BAND_MIN_WIDTH, std::min({ wanted, room, BAND_MAX_WIDTH }));
+        return { panel_width - BAND_RIGHT_MARGIN - width, width };
     }
 
     // One band of worked time. Every band the panel draws goes through
@@ -240,66 +194,21 @@ namespace {
         cr->fill();
     }
 
-    // --- The staged-task dock's vertical anchoring ---
-    //
-    // The dock is bottom-anchored a fixed gap above the now-line by a
-    // margin trick rather than by explicit positioning: m_staged_box
-    // gets valign(CENTER) plus a bottom margin, so the *padded* box
-    // centers on the line and its *content* therefore sits entirely
-    // above it. (Different from the clock box, which centers its content
-    // ON the line.)
-    //
-    // Both halves of that trick live here, adjacent, because they have
-    // to agree exactly and nothing in GTK enforces it: initialize_layout
-    // applies the margin, draw_dock_frame draws a border around wherever
-    // the content consequently lands. Previously each computed its own
-    // half independently and they were correct only by inspection.
-    //
-    // The derivation, once: centering a padded box of height
-    // (content_h + margin) puts its top edge at
-    // center_y - (content_h + margin)/2, and the content occupies the
-    // top content_h of that, so the content's bottom edge lands at
-    // center_y + (content_h - margin)/2. Substituting the margin below
-    // makes that exactly center_y - STAGED_BOX_GAP_ABOVE_LINE — which is
-    // why the margin needs *twice* the gap and not once: the margin
-    // grows the padded box, so only half of any added margin shows up as
-    // visible lift.
-    int dock_margin_bottom(int content_height) {
-        return content_height + 2 * STAGED_BOX_GAP_ABOVE_LINE;
+    // The panel's gold perimeter. A plain rectangle again: with the dock
+    // lifted out of the timeline there is nothing for it to break around.
+    // Inset by BORDER_HALF_WIDTH so the centred stroke isn't clipped at the
+    // true edge.
+    void draw_panel_border(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height) {
+        cr->set_source_rgba(GOLD_R, GOLD_G, GOLD_B, 0.9);
+        cr->set_line_width(STROKE_WIDTH);
+        cr->rectangle(BORDER_HALF_WIDTH, BORDER_HALF_WIDTH,
+                      width - STROKE_WIDTH, height - STROKE_WIDTH);
+        cr->stroke();
     }
-
-    double dock_content_bottom_y(double center_y) {
-        return center_y - STAGED_BOX_GAP_ABOVE_LINE;
-    }
-
-    // The dock frame's top and bottom edges. Needed by two different
-    // canvases: draw_dock_frame draws the frame, and draw_panel_border has
-    // to break the panel's own right edge over exactly the same span so the
-    // two meet rather than overlap. m_timeline and m_now_layer are both
-    // centred on the same line in m_body, so each can call this from its own
-    // centre and get the same answer.
-    struct DockSpan { double top, bottom; };
-
-    DockSpan dock_span(double content_bottom, int content_height) {
-        return { content_bottom - content_height - TASK_BOX_PAD_TOP,
-                 content_bottom + TASK_BOX_PAD_BOTTOM };
-    }
-
-    // The two reference points the dock's chrome is built from, derived
-    // once so the outer frame and the label border inside it can't end up
-    // measuring from different places.
-    struct DockGeometry {
-        BandColumn col;        // where the dock sits horizontally
-        double content_bottom; // where the real widgets' bottom edge lands
-
-        DockGeometry(int panel_width, double center_y, double dock_width)
-            : col(band_column(panel_width, dock_width)),
-              content_bottom(dock_content_bottom_y(center_y)) {}
-    };
 
     // The present-moment marker: a gold line running in from the left
     // edge into a flag-shaped clock whose triangular point IS the line's
-    // endpoint. Nothing continues past it into the dock's region.
+    // endpoint.
     void draw_now_marker(const Cairo::RefPtr<Cairo::Context>& cr, double center_y, time_t now) {
         std::tm tm_buf{};
         localtime_r(&now, &tm_buf);
@@ -363,97 +272,6 @@ namespace {
         cr->show_text(buf);
     }
 
-    // The dock's backing panel — same fill and gold border as the clock
-    // flag, so the two read as parts of one structure rather than two
-    // boxes floating separately. Drawn even with nothing staged: it's
-    // permanent furniture, not something that appears when a task
-    // arrives. Its right edge runs to the panel's own edge; only the left
-    // is derived from the content width.
-    void draw_dock_frame(const Cairo::RefPtr<Cairo::Context>& cr, int panel_width,
-                         const DockGeometry& dock, int content_height) {
-        const DockSpan span = dock_span(dock.content_bottom, content_height);
-        const double content_w = dock.col.width + TASK_BOX_PAD_X * 2;
-        const double x = dock.col.center() - content_w / 2.0;
-
-        // Fill and strokes both run right out to the panel's edge. Nothing
-        // to avoid there any more: draw_panel_border leaves this exact span
-        // of its right edge undrawn, so the dock occupies the boundary
-        // rather than sitting just inside it.
-        cr->set_source_rgb(DOCK_FILL_R, DOCK_FILL_G, DOCK_FILL_B);
-        cr->rectangle(x, span.top, panel_width - x, span.bottom - span.top);
-        cr->fill();
-
-        // Top, left and bottom only. The panel's perimeter turns in at
-        // span.top and resumes at span.bottom, so these three sides *are*
-        // the perimeter across the dock — not a second frame inside it.
-        // Same trick the clock flag uses where it meets its gold point.
-        cr->move_to(panel_width, span.top);
-        cr->line_to(x, span.top);
-        cr->line_to(x, span.bottom);
-        cr->line_to(panel_width, span.bottom);
-        cr->set_source_rgba(GOLD_R, GOLD_G, GOLD_B, 0.9);
-        cr->set_line_width(STROKE_WIDTH);
-        cr->stroke();
-    }
-
-    // The panel's gold perimeter, interrupted on the right across the
-    // dock's span. Instead of running straight down past the dock, the
-    // frame turns in at its top edge and picks up again at its bottom —
-    // draw_dock_frame supplies the three sides that carry it across. Drawn
-    // as one open path rather than a rectangle, since a rectangle can't
-    // have a bite taken out of it.
-    void draw_panel_border(const Cairo::RefPtr<Cairo::Context>& cr,
-                           int width, int height, const DockSpan& dock) {
-        const double l = BORDER_HALF_WIDTH;
-        const double t = BORDER_HALF_WIDTH;
-        const double r = width - BORDER_HALF_WIDTH;
-        const double b = height - BORDER_HALF_WIDTH;
-
-        // Clamped so a panel too short to contain the dock still produces a
-        // sane path rather than segments doubling back on themselves.
-        const double gap_top = std::clamp(dock.top, t, b);
-        const double gap_bottom = std::clamp(dock.bottom, t, b);
-
-        cr->move_to(r, gap_bottom);  // resume below the dock
-        cr->line_to(r, b);           // down the right
-        cr->line_to(l, b);           // along the bottom
-        cr->line_to(l, t);           // up the left
-        cr->line_to(r, t);           // along the top
-        cr->line_to(r, gap_top);     // back down, stopping at the dock
-
-        cr->set_source_rgba(GOLD_R, GOLD_G, GOLD_B, 0.9);
-        cr->set_line_width(STROKE_WIDTH);
-        cr->stroke();
-    }
-
-    // The recess the staged task's label sits in: filled back down to the
-    // timeline's own dark, then outlined. Cut into the dock's lighter fill
-    // rather than sitting on it, so the label reads as inset and the dock
-    // as the raised surface around it.
-    //
-    // Drawn whether or not anything is staged — an empty recess reads as a
-    // place a task goes, which is the point of the dock being permanent
-    // furniture. The outline is neutral rather than tinted to the project
-    // color: it marks where the label sits, and the label text already
-    // carries which project it belongs to.
-    void draw_label_slot(const Cairo::RefPtr<Cairo::Context>& cr,
-                         const DockGeometry& dock, int label_height) {
-        const double w = dock.col.width + LABEL_BORDER_PAD_X * 2;
-        const double h = label_height + LABEL_BORDER_PAD_TOP + LABEL_BORDER_PAD_BOTTOM;
-        const double x = dock.col.center() - w / 2.0;
-        // Grows upward only: the bottom edge lands at content_bottom plus
-        // the pinned bottom pad regardless of what the top pad becomes.
-        const double y = dock.content_bottom - label_height - LABEL_BORDER_PAD_TOP;
-
-        cr->set_source_rgb(BG_R, BG_G, BG_B);
-        cr->rectangle(x, y, w, h);
-        cr->fill();
-
-        cr->set_source_rgba(TICK_HOUR_R, TICK_HOUR_G, TICK_HOUR_B, 0.9);
-        cr->set_line_width(STROKE_WIDTH);
-        cr->rectangle(x, y, w, h);
-        cr->stroke();
-    }
 }
 
 SchedulePanel::SchedulePanel(TreeController& projects, Work& worklog, TaskAttributes& task_attributes)
@@ -497,8 +315,7 @@ void SchedulePanel::initialize_layout() {
     set_hexpand(true);
     set_vexpand(true);
 
-    // --- staged-task dock: buttons row on top, label below, overlaid
-    //     directly on m_body (the timeline) ---
+    // --- the staged-task dock, across the top ---
     m_activate_button.set_tooltip_text("Activate");
     m_activate_button.set_sensitive(false); // nothing staged yet
     m_activate_button.set_opacity(0.0); // not visible(false) — see class doc comment for why
@@ -511,100 +328,28 @@ void SchedulePanel::initialize_layout() {
 
     m_staged_buttons_row.append(m_activate_button);
     m_staged_buttons_row.append(m_complete_button);
-    // START rather than FILL: the dock is as wide as the panel allows, and
-    // two buttons stretched across all of it would look absurd.
     m_staged_buttons_row.set_halign(Gtk::Align::START);
-    // Clearance for the label's own drawn border, whose top stroke
-    // reaches LABEL_BORDER_PAD_Y plus half a stroke above the label.
-    // Set BEFORE the get_preferred_size() below, so the cached content
-    // height folds this gap in.
-    m_staged_buttons_row.set_margin_bottom(BUTTONS_LABEL_GAP);
 
-    // No character cap and no size request. m_staged_box is FILL-aligned,
-    // so its allocation is fixed by its parent and the label can't inflate
-    // it however long the text is — which is what a max_width_chars guess
-    // was previously there to prevent. The label simply ellipsizes against
-    // whatever width the dock actually got.
-    //
-    // Deliberately no dim-label class: this is the dock's main content,
-    // not secondary text.
+    // Ellipsizes against whatever width the dock gets. No character cap
+    // needed: the dock spans the panel, so its width is settled by the
+    // parent and a long title can't stretch it.
     m_slot_label.set_ellipsize(Pango::EllipsizeMode::END);
-    m_slot_label.set_xalign(0.5);
+    m_slot_label.set_xalign(0.0);
     m_slot_label.set_halign(Gtk::Align::FILL);
 
     m_staged_box.append(m_staged_buttons_row);
     m_staged_box.append(m_slot_label);
+    m_staged_box.add_css_class("staged-dock");
+    m_staged_box.set_hexpand(true);
+    m_staged_box.set_margin_bottom(DOCK_TIMELINE_GAP);
 
-    // FILL, not END: with FILL the parent's allocation decides this box's
-    // width outright, so no child can widen it and no size request is
-    // needed. Width is then purely a matter of the two margins — the right
-    // one fixed, the left one recomputed on resize (see below).
-    m_staged_box.set_halign(Gtk::Align::FILL);
-    m_staged_box.set_margin_end(static_cast<int>(BAND_RIGHT_MARGIN));
-    m_staged_box.set_margin_start(dock_left_margin(1400)); // plausible start; the first resize corrects it
-
-    // Measured and cached BEFORE the bottom-anchor margin gets applied
-    // below — get_preferred_size() on a widget that already has a margin
-    // set folds that margin back into the reported height, so
-    // re-measuring m_staged_box after this point would get back
-    // something like double the real content height. Everything needing
-    // the content's true height reads this cached value instead.
-    Gtk::Requisition min_req, nat_req;
-    m_staged_box.get_preferred_size(min_req, nat_req);
-    m_staged_box_content_height = nat_req.get_height();
-
-    // m_slot_label's own height alone, not the whole box — sizes the
-    // recess it sits in (see draw_label_slot). No margin concern here;
-    // this one's unaffected by the margin about to be applied below,
-    // since that margin is set on m_staged_box, not on the label itself.
-    Gtk::Requisition label_min, label_nat;
-    m_slot_label.get_preferred_size(label_min, label_nat);
-    m_slot_label_height = label_nat.get_height();
-
-    // valign + margin together are the bottom-anchor trick — see
-    // dock_margin_bottom, which is paired with the dock_content_bottom_y
-    // that draw_dock_frame borders against.
-    m_staged_box.set_valign(Gtk::Align::CENTER);
-    m_staged_box.set_margin_bottom(dock_margin_bottom(m_staged_box_content_height));
-
-    // --- body: scrolling timeline, with the now-line and the staged-task
-    //     controls both overlaid on top of it ---
+    // --- the timeline, filling everything below it ---
     m_timeline.set_hexpand(true);
     m_timeline.set_vexpand(true);
     m_timeline.set_draw_func(sigc::mem_fun(*this, &SchedulePanel::draw_timeline));
 
-    // The dock's width follows the panel's. Deferred to idle because this
-    // fires from inside the allocation pass that just reported the width,
-    // and changing a margin there would mutate the layout mid-traversal.
-    //
-    // The one-frame delay that introduces is harmless precisely because
-    // nothing drawn is computed from dock_width_for(): the band reads the
-    // dock's real allocation, so for that frame both are simply still the
-    // old width together, rather than disagreeing.
-    m_timeline.signal_resize().connect([this](int width, int) {
-        Glib::signal_idle().connect_once([this, width]() {
-            m_staged_box.set_margin_start(dock_left_margin(width));
-        });
-    });
-
-    m_body.set_child(m_timeline);
-
-    // Tall enough for whichever is taller, the clock flag or the dock
-    // frame. The dock extends upward from (center_y - GAP) by its content
-    // height plus padding on both sides, and this canvas is centered on
-    // the line, so it needs twice that distance in total or its own
-    // drawing is clipped at the top. +20 is slack, not load-bearing.
-    int now_layer_height = static_cast<int>(2 * (STAGED_BOX_GAP_ABOVE_LINE + m_staged_box_content_height + TASK_BOX_PAD_TOP)) + 20;
-    m_now_layer.set_size_request(-1, now_layer_height);
-    m_now_layer.set_halign(Gtk::Align::FILL);
-    m_now_layer.set_valign(Gtk::Align::CENTER);
-    m_now_layer.set_draw_func(sigc::mem_fun(*this, &SchedulePanel::draw_now_layer));
-    m_body.add_overlay(m_now_layer);
-    m_body.add_overlay(m_staged_box);
-
-    m_body.set_hexpand(true);
-    m_body.set_vexpand(true);
-    append(m_body);
+    append(m_staged_box);
+    append(m_timeline);
 }
 
 // ---------------------------------------------------------------------
@@ -617,11 +362,10 @@ void SchedulePanel::draw_timeline(const Cairo::RefPtr<Cairo::Context>& cr, int w
     cr->set_source_rgb(BG_R, BG_G, BG_B);
     cr->paint();
 
-    // Every band shares this column, which is exactly the staged-task
-    // dock's own width — that's the "the dock prints the bands" reading.
-    // Not tied to any individual task's label length, so completed bands
-    // don't shift when something else is staged later.
-    const BandColumn col = band_column(width, dock_width());
+    // Every band shares this column, so a task's own label length never
+    // determines how wide its band is and completed bands don't shift when
+    // something else is staged later.
+    const BandColumn col = band_column(width);
 
     time_t now = std::time(nullptr);
     TimelineGeometry geo{height, now};
@@ -702,22 +446,11 @@ void SchedulePanel::draw_timeline(const Cairo::RefPtr<Cairo::Context>& cr, int w
         }
     }
 
-    // The panel's perimeter, drawn last so no tick or band interrupts it.
-    // m_timeline fills the panel with no margin, so a border at this
-    // canvas's edges is the panel's border. The dock's span is computed
-    // from this canvas's own centre — the same value m_now_layer arrives at
-    // from its centre, which is what lets the two halves of the frame meet.
-    draw_panel_border(cr, width, height,
-                      dock_span(dock_content_bottom_y(geo.center_y), m_staged_box_content_height));
-}
+    // The present moment, over the ticks it sits among.
+    draw_now_marker(cr, geo.center_y, now);
 
-void SchedulePanel::draw_now_layer(const Cairo::RefPtr<Cairo::Context>& cr, int width, int height) {
-    const double center_y = height / 2.0;
-    const DockGeometry dock{width, center_y, dock_width()};
-
-    draw_now_marker(cr, center_y, std::time(nullptr));
-    draw_dock_frame(cr, width, dock, m_staged_box_content_height);
-    draw_label_slot(cr, dock, m_slot_label_height);
+    // The perimeter last, so no tick or band interrupts it.
+    draw_panel_border(cr, width, height);
 }
 
 // ---------------------------------------------------------------------
@@ -725,8 +458,7 @@ void SchedulePanel::draw_now_layer(const Cairo::RefPtr<Cairo::Context>& cr, int 
 // ---------------------------------------------------------------------
 
 bool SchedulePanel::on_timer_tick() {
-    m_timeline.queue_draw();
-    m_now_layer.queue_draw(); // the clock reads live, so this can't be drawn once and left
+    m_timeline.queue_draw(); // the clock reads live, so this can't be drawn once and left
     return true; // keep repeating
 }
 
@@ -756,16 +488,6 @@ void SchedulePanel::stage_task(int task_id) {
     refresh_staged_label();
 }
 
-double SchedulePanel::dock_width() const {
-    // Read, not recomputed. get_width() is the width GTK actually allocated
-    // for the frame being drawn — unlike get_preferred_size(), which is a
-    // request and can lag a cycle behind what's on screen. Deriving the
-    // band from this rather than from dock_width_for() is what makes the
-    // drawn band and the real widgets incapable of disagreeing.
-    const int allocated = m_staged_box.get_width();
-    return allocated > 0 ? static_cast<double>(allocated) : DOCK_MIN_WIDTH;
-}
-
 void SchedulePanel::refresh_completed_bands() {
     m_completed_bands = m_work.entries_for_day(std::time(nullptr));
 }
@@ -790,10 +512,10 @@ void SchedulePanel::refresh_staged_label() {
     TaskSnapshot snap = m_task_attributes.snapshot(m_staged_id);
     std::string text = (snap.path.empty() ? "" : snap.path + " - ") + snap.title;
 
-    // Always explicit markup, never plain set_text(): the label sits on a
-    // dark recess this file paints itself, so a light theme's default text
-    // color would come out dark-on-dark. DEFAULT_TEXT_COLOR covers the
-    // "no project color" case.
+    // Always explicit markup, never plain set_text(): the dock has a dark
+    // background of its own (see MainWindow::apply_styles), so a light
+    // theme's default text color would come out dark-on-dark.
+    // DEFAULT_TEXT_COLOR covers the "no project color" case.
     std::string effective_color = snap.color.empty() ? DEFAULT_TEXT_COLOR : snap.color;
     m_slot_label.set_markup("<span foreground='" + effective_color + "'>" + Glib::Markup::escape_text(text) + "</span>");
 

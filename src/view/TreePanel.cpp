@@ -20,6 +20,8 @@
 #include <array>
 #include <iostream>
 #include <cstdio>
+#include <functional>
+#include <memory>
 
 // Flip to 1 while debugging factory binds; 0 for normal use.
 #define TREEPANEL_DEBUG 0
@@ -292,7 +294,17 @@ void TreePanel::apply_row_visuals(CardRow& card, TreeType type, int id) {
         // Both lookups walk the Projects tree, and the two trees have
         // independent id spaces — running either against a Life node would
         // be a coincidental, meaningless hit.
-        card.set_marker(m_task_attributes.is_generator(id) ? "🔁" : "");
+        // A node can be both — the generator marker wins, since that's the
+        // less obvious property of the two. The ordering arrow trails the
+        // title: leading, it indents the text and reads like tree structure
+        // rather than a note about the row.
+        if (m_task_attributes.is_generator(id)) {
+            card.set_marker("🔁");
+        } else if (m_task_attributes.is_sequential(id)) {
+            card.set_marker("↓", CardRow::MarkerSide::AFTER);
+        } else {
+            card.set_marker("");
+        }
         card.set_color(m_task_attributes.get_color(id));
         return;
     }
@@ -369,7 +381,30 @@ void TreePanel::show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow
     // Repeating is a task concept — Projects tab only, and never on the
     // root (which is hidden there anyway, so id is never 0 in practice).
     if (type == TreeType::PROJECTS && id > 0) {
+        // Marks the parent: its children happen in order. Offered on any
+        // project node with children, at any depth — a chapter broken into
+        // sections is the same shape as a routine broken into steps.
+        if (!m_projects.children_of(id).empty()) {
+            const bool sequential = m_task_attributes.is_sequential(id);
+            auto* seq_button = Gtk::make_managed<Gtk::Button>(
+                sequential ? "Unordered" : "Do in order");
+            seq_button->signal_clicked().connect([this, id, sequential, popover]() {
+                popover->popdown();
+                Glib::signal_idle().connect_once([this, id, sequential]() {
+                    if (sequential) m_task_attributes.unmark_sequential(id);
+                    else            m_task_attributes.mark_sequential(id);
+                });
+            });
+            menu_box->append(*seq_button);
+        }
+
         if (m_task_attributes.is_generator(id)) {
+            auto* edit_button = Gtk::make_managed<Gtk::Button>("Edit schedule…");
+            edit_button->signal_clicked().connect([this, id, popover]() {
+                popover->set_child(*build_repeat_config(id, popover));
+            });
+            menu_box->append(*edit_button);
+
             auto* stop_button = Gtk::make_managed<Gtk::Button>("Stop repeating");
             stop_button->signal_clicked().connect([this, id, popover]() {
                 popover->popdown();
@@ -439,6 +474,13 @@ Gtk::Widget* TreePanel::build_repeat_config(int id, Gtk::Popover* popover) {
     auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
     box->set_margin(10);
 
+    // Opens showing what's currently set, so this doubles as the editor —
+    // changing a schedule doesn't mean stopping and starting over. For a
+    // task that isn't yet a generator, repeat_settings gives a zeroed row
+    // and the defaults below apply instead.
+    const bool editing = m_task_attributes.is_generator(id);
+    const RepeatedTaskRow current = m_task_attributes.repeat_settings(id);
+
     // One toggle per weekday, ordered Sun..Sat to match
     // RepeatedTaskRow::weekday_mask's bit order (tm_wday: Sunday=0),
     // so building the mask below needs no reordering.
@@ -447,29 +489,39 @@ Gtk::Widget* TreePanel::build_repeat_config(int id, Gtk::Popover* popover) {
     auto day_buttons = std::make_shared<std::array<Gtk::ToggleButton*, 7>>();
     for (int i = 0; i < 7; ++i) {
         auto* btn = Gtk::make_managed<Gtk::ToggleButton>(day_labels[i]);
-        btn->set_active(true); // default: every day
+        btn->set_active(editing ? (current.weekday_mask & (1 << i)) != 0
+                                : true); // new generators default to every day
         days_box->append(*btn);
         (*day_buttons)[i] = btn;
     }
     box->append(*days_box);
 
-    auto count_adjustment = Gtk::Adjustment::create(1, 1, 20, 1);
+    auto count_adjustment = Gtk::Adjustment::create(
+        editing ? current.count_per_day : 1, 1, 20, 1);
     auto* count_spin = Gtk::make_managed<Gtk::SpinButton>(count_adjustment);
     box->append(*count_spin);
 
-    auto* apply_button = Gtk::make_managed<Gtk::Button>("Repeat");
-    apply_button->signal_clicked().connect([this, id, day_buttons, count_spin, popover]() {
+    // Off by default: most repeating things are opportunities tied to their
+    // day, and a missed one is simply missed. On, they queue up — for the
+    // things that stay owed however late you are.
+    auto* accumulate_check = Gtk::make_managed<Gtk::CheckButton>("Missed ones pile up");
+    accumulate_check->set_active(editing && current.accumulates);
+    box->append(*accumulate_check);
+
+    auto* apply_button = Gtk::make_managed<Gtk::Button>(editing ? "Update" : "Repeat");
+    apply_button->signal_clicked().connect([this, id, day_buttons, count_spin, accumulate_check, popover]() {
         int mask = 0;
         for (int i = 0; i < 7; ++i) {
             if ((*day_buttons)[i]->get_active()) mask |= (1 << i);
         }
         int count = count_spin->get_value_as_int();
+        bool accumulates = accumulate_check->get_active();
         popover->popdown();
-        // mask/count are plain values, read before deferring — day_buttons
-        // and count_spin themselves live inside this popover and shouldn't
-        // be touched from the deferred callback below, after it's closing.
-        Glib::signal_idle().connect_once([this, id, mask, count]() {
-            m_task_attributes.mark_repeating(id, mask, count);
+        // All three are plain values, read before deferring — the widgets
+        // themselves live inside this popover and shouldn't be touched from
+        // the deferred callback below, after it's closing.
+        Glib::signal_idle().connect_once([this, id, mask, count, accumulates]() {
+            m_task_attributes.mark_repeating(id, mask, count, accumulates);
         });
     });
     box->append(*apply_button);
@@ -549,10 +601,30 @@ Gtk::Widget* TreePanel::build_link_picker(int id, Gtk::Popover* popover) {
     auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
     box->set_margin(6);
 
-    auto* heading = Gtk::make_managed<Gtk::Label>("Which life goals does this serve?");
+    auto* heading = Gtk::make_managed<Gtk::Label>("How much of this project is about each goal?");
     heading->add_css_class("dim-label");
     heading->set_halign(Gtk::Align::START);
+    heading->set_wrap(true);
+    heading->set_max_width_chars(38);
     box->append(*heading);
+
+    // A running total of this project's own shares. Not a rule — the
+    // arithmetic reads each weight against the OTHER projects on the same
+    // goal, not against this project's other weights, so nothing breaks if
+    // it doesn't come to 100. It's here because thinking in "60/40" is what
+    // makes the number answerable, and seeing the sum keeps that honest.
+    auto* total_label = Gtk::make_managed<Gtk::Label>();
+    total_label->add_css_class("dim-label");
+    total_label->set_halign(Gtk::Align::START);
+
+    auto refresh_total = std::make_shared<std::function<void()>>();
+    *refresh_total = [this, id, total_label]() {
+        double sum = 0.0;
+        for (int leaf : m_priority.leaves_for(id)) sum += m_priority.link_weight(id, leaf);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "These add up to %.0f%%", sum);
+        total_label->set_text(buf);
+    };
 
     auto* list = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
 
@@ -571,16 +643,43 @@ Gtk::Widget* TreePanel::build_link_picker(int id, Gtk::Popover* popover) {
         std::string label = path.empty() ? m_life.get_title(leaf)
                                          : path + " > " + m_life.get_title(leaf);
 
+        auto* row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
+
         auto* check = Gtk::make_managed<Gtk::CheckButton>(label);
         check->set_active(m_priority.has_link(id, leaf));
-        check->signal_toggled().connect([this, id, leaf, check]() {
-            // Weight 1.0 for every association. The leaf divides its own
-            // share evenly among whatever serves it, which is the honest
-            // reading until there's a reason to say one matters more.
-            if (check->get_active()) m_priority.set_link(id, leaf, 1.0);
+        check->set_hexpand(true);
+        check->set_halign(Gtk::Align::START);
+
+        // Full claim by default: a project you have just said serves a goal
+        // is presumed to serve it wholly until you say otherwise. Starting
+        // at a fraction would make every new association quietly weaker
+        // than the ones already there.
+        auto adjustment = Gtk::Adjustment::create(
+            m_priority.has_link(id, leaf) ? m_priority.link_weight(id, leaf) : 100.0,
+            0.0, 100.0, 5.0);
+        auto* weight_spin = Gtk::make_managed<Gtk::SpinButton>(adjustment);
+        weight_spin->set_digits(0);
+        weight_spin->set_sensitive(check->get_active());
+
+        check->signal_toggled().connect([this, id, leaf, check, weight_spin, refresh_total]() {
+            weight_spin->set_sensitive(check->get_active());
+            if (check->get_active()) m_priority.set_link(id, leaf, weight_spin->get_value());
             else                     m_priority.clear_link(id, leaf);
+            (*refresh_total)();
         });
-        list->append(*check);
+
+        weight_spin->signal_value_changed().connect([this, id, leaf, check, weight_spin, refresh_total]() {
+            // Only writes while the association exists — the spin button
+            // still holds a value when unchecked, and it shouldn't
+            // resurrect a link the user just removed.
+            if (!check->get_active()) return;
+            m_priority.set_link(id, leaf, weight_spin->get_value());
+            (*refresh_total)();
+        });
+
+        row->append(*check);
+        row->append(*weight_spin);
+        list->append(*row);
     }
 
     // Grows to fit a short list, scrolls once the life tree gets big
@@ -591,6 +690,9 @@ Gtk::Widget* TreePanel::build_link_picker(int id, Gtk::Popover* popover) {
     scroller->set_max_content_height(320);
     scroller->set_child(*list);
     box->append(*scroller);
+
+    (*refresh_total)();
+    box->append(*total_label);
 
     auto* done_button = Gtk::make_managed<Gtk::Button>("Done");
     done_button->signal_clicked().connect([popover]() { popover->popdown(); });

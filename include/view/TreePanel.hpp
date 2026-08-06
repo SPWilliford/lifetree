@@ -103,11 +103,10 @@ private:
     // that's what got decided over building a full color-dialog picker.
     Gtk::Widget* build_color_picker(int id, Gtk::Popover* popover);
 
-    // reached via "Supports…" — one checkbox per life tree leaf, toggling
-    // whether this project counts as serving it. No weight control yet:
-    // every association is equal, which makes a leaf split evenly among
-    // whatever serves it. That's a reasonable default, and one fewer thing
-    // to decide before the numbers have been lived with.
+    // reached via "Supports…" — one row per life tree leaf: whether this
+    // project serves it, and how much of the project is really about it.
+    // The weight is read against the other projects on the SAME goal, so a
+    // project wholly devoted to a goal outranks one that only partly is.
     Gtk::Widget* build_link_picker(int id, Gtk::Popover* popover);
 
     // reached via "Set weight…" on a life tree node — how much of its

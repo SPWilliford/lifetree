@@ -63,11 +63,32 @@ Database::Database(const std::string& path) {
         execute("ALTER TABLE work_log ADD COLUMN project_root_id INTEGER NOT NULL DEFAULT -1;");
     }
 
+    // Link weights were written as a fixed 1.0 placeholder while there was
+    // no way to edit them. They're now percentages — "how much of this
+    // project is about this leaf" — so every old placeholder becomes 100.
+    // Guarded by user_version rather than by the value itself: 1.0 is a
+    // legitimate weight now (1%), and a value-based check would keep
+    // promoting it to 100 on every launch.
+    // Existing generators keep the behaviour they've had all along:
+    // yesterday's untouched instances are cleared when today's spawn.
+    if (!has_column("repeated_tasks", "accumulates")) {
+        execute("ALTER TABLE repeated_tasks ADD COLUMN accumulates INTEGER NOT NULL DEFAULT 0;");
+    }
+
+    if (schema_version() < 1) {
+        execute("UPDATE project_links SET weight = 100.0;");
+        execute("PRAGMA user_version = 1;");
+    }
+
     execute("CREATE TABLE IF NOT EXISTS repeated_tasks ("
             "  generator_id INTEGER PRIMARY KEY REFERENCES projects_tree(id) ON DELETE CASCADE, "
             "  weekday_mask INTEGER NOT NULL, "
             "  count_per_day INTEGER NOT NULL DEFAULT 1, "
+            "  accumulates INTEGER NOT NULL DEFAULT 0, "
             "  last_spawned_date TEXT NOT NULL DEFAULT '');");
+
+    execute("CREATE TABLE IF NOT EXISTS sequential_nodes ("
+            "  node_id INTEGER PRIMARY KEY REFERENCES projects_tree(id) ON DELETE CASCADE);");
 
     execute("CREATE TABLE IF NOT EXISTS project_colors ("
             "  project_root_id INTEGER PRIMARY KEY REFERENCES projects_tree(id) ON DELETE CASCADE, "
@@ -93,6 +114,16 @@ Database::~Database() {
 
 std::string_view Database::table_name(TreeType type) const {
     return (type == TreeType::LIFE) ? "life_tree" : "projects_tree";
+}
+
+int Database::schema_version() {
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, "PRAGMA user_version;", -1, &stmt, nullptr) != SQLITE_OK) return 0;
+
+    int version = 0;
+    if (sqlite3_step(stmt) == SQLITE_ROW) version = sqlite3_column_int(stmt, 0);
+    sqlite3_finalize(stmt);
+    return version;
 }
 
 bool Database::has_column(const std::string& table, const std::string& column) {
@@ -298,10 +329,64 @@ std::vector<WorkLogRow> Database::load_work_log_for_day(time_t day) {
     return rows;
 }
 
-bool Database::insert_repeated_task(int generator_id, int weekday_mask, int count_per_day) {
+bool Database::insert_sequential(int node_id) {
+    std::string sql = "INSERT OR REPLACE INTO sequential_nodes (node_id) VALUES (?);";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] insert_sequential: failed to prepare statement for id " << node_id);
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, node_id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) DB_ERR("[Database] insert_sequential failed for id " << node_id);
+    return ok;
+}
+
+bool Database::remove_sequential(int node_id) {
+    std::string sql = "DELETE FROM sequential_nodes WHERE node_id = ?;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
+        DB_ERR("[Database] remove_sequential: failed to prepare statement for id " << node_id);
+        return false;
+    }
+
+    sqlite3_bind_int(stmt, 1, node_id);
+    bool ok = sqlite3_step(stmt) == SQLITE_DONE;
+    sqlite3_finalize(stmt);
+
+    if (!ok) DB_ERR("[Database] remove_sequential failed for id " << node_id);
+    return ok;
+}
+
+std::vector<int> Database::load_sequential() {
+    std::vector<int> ids;
+    std::string sql = "SELECT node_id FROM sequential_nodes;";
+
+    sqlite3_stmt* stmt = nullptr;
+    if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return ids;
+
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        ids.push_back(sqlite3_column_int(stmt, 0));
+    }
+    sqlite3_finalize(stmt);
+    return ids;
+}
+
+bool Database::insert_repeated_task(int generator_id, int weekday_mask, int count_per_day, bool accumulates) {
+    // Keeps any existing last_spawned_date rather than blanking it, so
+    // changing a schedule doesn't read as "never spawned" and trigger a
+    // fresh spawn — which would delete today's instances, completed ones
+    // included, and recreate them. COALESCE picks up the old value when
+    // this replaces an existing row, and '' when it's genuinely new.
     std::string sql = "INSERT OR REPLACE INTO repeated_tasks "
-                       "(generator_id, weekday_mask, count_per_day, last_spawned_date) "
-                       "VALUES (?, ?, ?, '');";
+                       "(generator_id, weekday_mask, count_per_day, accumulates, last_spawned_date) "
+                       "VALUES (?, ?, ?, ?, "
+                       "  COALESCE((SELECT last_spawned_date FROM repeated_tasks WHERE generator_id = ?), ''));";
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) {
@@ -311,6 +396,8 @@ bool Database::insert_repeated_task(int generator_id, int weekday_mask, int coun
 
     sqlite3_bind_int(stmt, 1, generator_id);
     sqlite3_bind_int(stmt, 2, weekday_mask);
+    sqlite3_bind_int(stmt, 4, accumulates ? 1 : 0);
+    sqlite3_bind_int(stmt, 5, generator_id); // the subquery's own lookup
     sqlite3_bind_int(stmt, 3, count_per_day);
 
     bool ok = sqlite3_step(stmt) == SQLITE_DONE;
@@ -365,18 +452,21 @@ bool Database::update_last_spawned(int generator_id, const std::string& date) {
 
 std::vector<RepeatedTaskRow> Database::load_repeated_tasks() {
     std::vector<RepeatedTaskRow> rows;
-    std::string sql = "SELECT generator_id, weekday_mask, count_per_day, last_spawned_date FROM repeated_tasks;";
+    std::string sql = "SELECT generator_id, weekday_mask, count_per_day, accumulates, last_spawned_date FROM repeated_tasks;";
 
     sqlite3_stmt* stmt = nullptr;
     if (sqlite3_prepare_v2(m_db, sql.c_str(), -1, &stmt, nullptr) != SQLITE_OK) return rows;
 
     while (sqlite3_step(stmt) == SQLITE_ROW) {
-        int generator_id = sqlite3_column_int(stmt, 0);
-        int weekday_mask = sqlite3_column_int(stmt, 1);
-        int count_per_day = sqlite3_column_int(stmt, 2);
-        const char* date_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 3));
+        const char* date_ptr = reinterpret_cast<const char*>(sqlite3_column_text(stmt, 4));
 
-        rows.push_back({ generator_id, weekday_mask, count_per_day, date_ptr ? date_ptr : "" });
+        rows.push_back(RepeatedTaskRow{
+            .generator_id = sqlite3_column_int(stmt, 0),
+            .weekday_mask = sqlite3_column_int(stmt, 1),
+            .count_per_day = sqlite3_column_int(stmt, 2),
+            .accumulates = sqlite3_column_int(stmt, 3) != 0,
+            .last_spawned_date = date_ptr ? date_ptr : ""
+        });
     }
     sqlite3_finalize(stmt);
     return rows;

@@ -3,6 +3,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <sigc++/signal.h>
 #include "core/Database.hpp"
 
@@ -47,14 +48,37 @@ public:
 
     bool is_generator(int id) const;
 
+    // The stored schedule for a generator, so an editor can open showing
+    // what's actually set rather than a fresh default. weekday_mask is 0
+    // when id isn't a generator — check is_generator() to tell that from a
+    // real row, though a mask of 0 would never repeat anyway.
+    RepeatedTaskRow repeat_settings(int id) const;
+
     // INSERT OR REPLACE semantics — calling this again on an existing
     // generator updates its schedule and resets last_spawned_date, so
     // the new schedule takes effect on the next scan.
-    void mark_repeating(int id, int weekday_mask, int count_per_day);
+    void mark_repeating(int id, int weekday_mask, int count_per_day, bool accumulates);
 
     // Only removes the repeat config — whatever instances currently
     // exist under id are left alone, now ordinary untracked tasks.
     void unmark_repeating(int id);
+
+    // A sequential node's descendants are worked in order: only the first
+    // incomplete one is a candidate for the backlog, and the rest stay
+    // hidden until it's done. Lets a chapter be broken into sections
+    // without all of them competing for attention at once.
+    //
+    // Marks the PARENT — "these children are ordered" — not the children.
+    void mark_sequential(int id);
+    void unmark_sequential(int id);
+    bool is_sequential(int id) const;
+
+    // Descendants of a sequential ancestor that aren't next in line. These
+    // are real tasks, deliberately withheld: the backlog skips them, and
+    // nothing else should treat them as absent.
+    //
+    // Returned as a set because the caller is filtering a list against it.
+    std::unordered_set<int> blocked_tasks() const;
 
     // Checks every generator against today's date and weekday, and
     // spawns fresh instances for any that are due and haven't already
@@ -97,6 +121,13 @@ private:
     std::shared_ptr<Database> m_db;
     TreeController& m_projects;
     std::unordered_map<int, RepeatedTaskRow> m_generators;
+
+    // Nodes whose children are ordered. Membership is the whole flag.
+    std::unordered_set<int> m_sequential;
+
+    // Walks a sequential node's subtree in position order, adding every
+    // task after the first to out.
+    void collect_blocked(int node_id, bool& found_first, std::unordered_set<int>& out) const;
     std::unordered_map<int, std::string> m_project_colors;
     sigc::signal<void()> m_changed;
 

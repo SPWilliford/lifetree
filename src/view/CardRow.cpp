@@ -17,8 +17,19 @@ CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view
     m_current_text = std::string(initial_text);
     m_label.set_text(m_current_text);
     m_label.set_halign(Gtk::Align::START);
-    m_label.set_hexpand(true);
+    // Not hexpand: the label taking all the slack would push a trailing
+    // marker out to the row's far right, where it reads as a separate
+    // column rather than as a note on the title. The spacer below absorbs
+    // the slack instead, so the marker stays beside the text it belongs to
+    // while the row still fills its width (which the double-click gesture
+    // needs — a narrow row would only be clickable over the text).
     append(m_label);
+
+    m_marker_after.set_visible(false);
+    append(m_marker_after);
+
+    m_spacer.set_hexpand(true);
+    append(m_spacer);
 
     // Connected once, for the lifetime of this widget — NOT inside the
     // double-click handler. Editing can start and finish many times for
@@ -37,7 +48,10 @@ CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view
             render_label();
             remove(m_editor);
             m_is_editing = false;
-            append(m_label);
+            // insert_child_after, not append — append would put the label
+            // past the trailing marker, so a row edited once would show its
+            // marker on the wrong side from then on.
+            insert_child_after(m_label, m_marker);
         }
     });
 
@@ -54,7 +68,7 @@ CardRow::CardRow(std::string_view initial_text, sigc::slot<void(std::string_view
                                                 // already strips markup), but
                                                 // this doesn't lean on that
             m_editor.set_hexpand(true);
-            append(m_editor);
+            insert_child_after(m_editor, m_marker); // where the label just was
 
             Glib::signal_timeout().connect_once([this]() {
                 m_editor.start_editing();
@@ -91,13 +105,16 @@ void CardRow::set_color(const std::string& hex_color) {
     render_label();
 }
 
-void CardRow::set_marker(std::string_view emoji) {
-    if (emoji.empty()) {
-        m_marker.set_visible(false);
-    } else {
-        m_marker.set_text(std::string(emoji));
-        m_marker.set_visible(true);
-    }
+void CardRow::set_marker(std::string_view emoji, MarkerSide side) {
+    // Always clear both — a row whose marker moves sides would otherwise
+    // keep showing the old one.
+    m_marker.set_visible(false);
+    m_marker_after.set_visible(false);
+    if (emoji.empty()) return;
+
+    Gtk::Label& target = (side == MarkerSide::BEFORE) ? m_marker : m_marker_after;
+    target.set_text(std::string(emoji));
+    target.set_visible(true);
 }
 
 void CardRow::set_active(bool active) {

@@ -61,9 +61,18 @@ struct CompletedTaskSummary {
 // checking "is today included" needs no conversion. last_spawned_date
 // is "YYYY-MM-DD", empty until the first scan touches this generator.
 struct RepeatedTaskRow {
-    int generator_id;
-    int weekday_mask;
-    int count_per_day;
+    // Defaults matter: TaskAttributes::repeat_settings returns a
+    // value-initialized row for a task that isn't a generator, and a mask
+    // of 0 correctly means "repeats on no days".
+    int generator_id = -1;
+    int weekday_mask = 0;
+    int count_per_day = 1;
+
+    // Whether instances that were never completed survive into the next
+    // spawn. False expires them — a missed lesson is simply missed. True
+    // lets them pile up, for things that stay owed however late they are.
+    bool accumulates = false;
+
     std::string last_spawned_date;
 };
 
@@ -104,6 +113,12 @@ private:
     // thrown-and-caught exception as routine, expected control flow on
     // every single startup.
     bool has_column(const std::string& table, const std::string& column);
+
+    // SQLite's built-in PRAGMA user_version. For one-off data migrations
+    // that a column check can't express — changing what values in an
+    // existing column MEAN, rather than adding a new one. 0 on any
+    // database written before versioning started.
+    int schema_version();
     // Midnight-to-midnight in local time, computed from any instant
     // within that day. Shared by every "for this day" query, so they
     // can't independently drift out of sync with each other.
@@ -156,7 +171,13 @@ public:
     // generator updates its config and resets last_spawned_date, so a
     // changed schedule takes effect on the next scan rather than waiting
     // for whatever the old schedule would have done.
-    bool insert_repeated_task(int generator_id, int weekday_mask, int count_per_day);
+    // Sequential projects. Like repeated_tasks, the row's existence IS the
+    // flag — there's nothing else to store.
+    bool insert_sequential(int node_id);
+    bool remove_sequential(int node_id);
+    std::vector<int> load_sequential();
+
+    bool insert_repeated_task(int generator_id, int weekday_mask, int count_per_day, bool accumulates);
     bool remove_repeated_task(int generator_id);
     bool update_last_spawned(int generator_id, const std::string& date);
     std::vector<RepeatedTaskRow> load_repeated_tasks();

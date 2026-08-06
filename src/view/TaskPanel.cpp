@@ -4,6 +4,7 @@
 #include "core/Work.hpp"
 #include "core/TaskAttributes.hpp"
 #include "core/Priority.hpp"
+#include "core/Scheduler.hpp"
 #include <algorithm>
 #include <vector>
 #include <pangomm/layout.h>
@@ -183,32 +184,45 @@ void TaskPanel::on_bind(const Glib::RefPtr<Gtk::ListItem>& item) {
 void TaskPanel::refresh() {
     m_store->remove_all();
 
-    std::vector<int> ids;
+    const auto blocked = m_task_attributes.blocked_tasks();
+
+    std::vector<scheduler::Candidate> candidates;
     for (int id : m_projects.leaves()) {
         if (m_task_attributes.is_generator(id)) continue; // the generator itself isn't a real task
-        ids.push_back(id);
+
+        // A top-level node is a project, not a task — that's what the rest
+        // of the system already assumes, since colors, life goal links and
+        // work_log.project_root_id all hang off exactly these ids.
+        //
+        // It matters here because "leaf" and "task" aren't the same thing.
+        // A project becomes a leaf the moment its last task is completed,
+        // and an ongoing category like "Clean" would then reappear in the
+        // backlog as if it were work — every time you finished clearing it.
+        if (m_projects.parent_of(id) == 0) continue;
+
+        // Held back behind an earlier sibling in a sequential project —
+        // real work, deliberately out of sight until its turn.
+        if (blocked.count(id) > 0) continue;
+
+        candidates.push_back({ id, m_task_attributes.project_root_of(id) });
     }
 
-    // Ordered by the priority of the project each task belongs to — the
-    // first ordering this list has ever had. Deliberately naive: it ranks
-    // whole projects, and says nothing about which task within a project
-    // to do first, or about recurrence, or capacity. A rough order beats
-    // none, and the scheduler that replaces this wants real inputs to be
-    // designed against.
-    //
-    // stable_sort, so tasks of equal priority keep the order leaves()
-    // produced. Before any associations exist every project sits at zero,
-    // which means this changes nothing until the first link is made.
-    const auto project_values = m_priority.project_priorities();
-    auto priority_of = [&](int task_id) {
-        auto it = project_values.find(m_task_attributes.project_root_of(task_id));
-        return (it != project_values.end()) ? it->second : 0.0;
-    };
-    std::stable_sort(ids.begin(), ids.end(), [&](int a, int b) {
-        return priority_of(a) > priority_of(b);
+    // leaves() walks an unordered map, so the order it hands back isn't
+    // defined between runs. Sorting here gives the scheduler a stable
+    // input, which is what lets an unchanged backlog produce an unchanged
+    // list — the scheduler itself is deterministic, but only as far as
+    // what it's given is.
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+        if (a.project_id != b.project_id) return a.project_id < b.project_id;
+        return a.task_id < b.task_id;
     });
 
-    for (int id : ids) m_store->append(TreeObject::create(id));
+    // Interleaved rather than sorted: sorting groups every project's tasks
+    // into one block, so the top of the list is always the same project and
+    // a fragmented goal is never reached at all.
+    for (int id : scheduler::interleave(candidates, m_priority.project_priorities())) {
+        m_store->append(TreeObject::create(id));
+    }
 }
 
 void TaskPanel::refresh_completed() {
