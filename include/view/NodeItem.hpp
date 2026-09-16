@@ -4,11 +4,9 @@
 #include <glibmm/object.h>
 #include <glibmm/refptr.h>
 
-// A node id, boxed so it can live in a Gio::ListStore — GTK's list models
-// hold GObjects and an int isn't one.
-//
-// Stores nothing else on purpose: title, color and markers are read from
-// the controllers at bind time, so there's no copy here to go stale.
+// A node id boxed as a GObject, so it can live in a Gio::ListStore. Holds
+// nothing else: title and decoration are read from the controllers at bind
+// time, so there's no copy to go stale.
 class NodeItem : public Glib::Object {
 public:
     static Glib::RefPtr<NodeItem> create(int node_id) {

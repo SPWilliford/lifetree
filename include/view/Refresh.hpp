@@ -4,24 +4,15 @@
 #include <glibmm/main.h>
 #include <sigc++/sigc++.h>
 
-// A re-read of whatever a panel shows, run at most once per idle cycle
-// however many times it's asked for. Two problems:
+// Runs an action at most once per idle cycle however often it's requested.
+// Deferring keeps a panel from rebuilding its model inside the GTK event
+// that triggered the change; coalescing absorbs bursts of core signals.
 //
-// Deferring: a panel must not rebuild its list store while GTK is still
-// delivering the event that triggered the change — that mutates a model out
-// from under the widget currently dispatching.
-//
-// Coalescing: the core signals are coarse and arrive in bursts. A spawn
-// scan adding six instances emits six tree-changed signals.
-//
-// Derives from sigc::trackable and binds through mem_fun, so an owner
-// destroyed with a run pending empties the slot instead of leaving a
-// callback into freed memory.
+// sigc::trackable: an owner destroyed with a run pending empties the slot.
 class Refresh : public sigc::trackable {
 public:
     explicit Refresh(sigc::slot<void()> action) : m_action(std::move(action)) {}
 
-    // Safe to call repeatedly: the first schedules, the rest are absorbed.
     void request() {
         if (m_pending) return;
         m_pending = true;
@@ -30,8 +21,8 @@ public:
 
 private:
     void fire() {
-        // Cleared before the action, so anything the action itself requests
-        // schedules a fresh run instead of being swallowed by this one.
+        // Cleared before the action, so a request made by the action itself
+        // schedules a fresh run.
         m_pending = false;
         m_action();
     }

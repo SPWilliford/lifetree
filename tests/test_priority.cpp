@@ -54,19 +54,53 @@ TEST(siblings_always_sum_to_total_in_whole_numbers) {
     CHECK(all_whole(m.priority, kids));
 }
 
-// Pins CURRENT behaviour: a newcomer takes 1/n and the existing set is
-// scaled to make room, so siblings added one at a time do not end up even.
-TEST(adding_a_sibling_dilutes_the_existing_set) {
+TEST(a_sibling_added_to_an_even_set_joins_it_evenly) {
+    Model m;
+    const int a = m.life.add(0, "A");
+    CHECK_EQ(m.priority.weight_of(a), 100.0);
+
+    const int b = m.life.add(0, "B");
+    CHECK_EQ(m.priority.weight_of(a), 50.0);
+    CHECK_EQ(m.priority.weight_of(b), 50.0);
+
+    const int c = m.life.add(0, "C");
+    CHECK_NEAR(m.priority.weight_of(a), 33.0, 1.0);
+    CHECK_NEAR(m.priority.weight_of(b), 33.0, 1.0);
+    CHECK_NEAR(m.priority.weight_of(c), 33.0, 1.0);
+    CHECK_NEAR(sum_of(m.priority, {a, b, c}), Priority::TOTAL, 1e-9);
+}
+
+TEST(a_sibling_added_to_a_hand_weighted_set_arrives_at_zero) {
     Model m;
     const int a = m.life.add(0, "A");
     const int b = m.life.add(0, "B");
-    CHECK_EQ(m.priority.weight_of(a), 67.0);
-    CHECK_EQ(m.priority.weight_of(b), 33.0);
+    m.priority.set_weight(a, 70.0);
 
     const int c = m.life.add(0, "C");
-    CHECK_EQ(m.priority.weight_of(a), 50.0);
-    CHECK_EQ(m.priority.weight_of(b), 25.0);
-    CHECK_EQ(m.priority.weight_of(c), 25.0);
+    CHECK_EQ(m.priority.weight_of(a), 70.0);
+    CHECK_EQ(m.priority.weight_of(b), 30.0);
+    CHECK_EQ(m.priority.weight_of(c), 0.0);
+
+    // Giving it a weight pulls from the others proportionally.
+    m.priority.set_weight(c, 10.0);
+    CHECK_EQ(m.priority.weight_of(c), 10.0);
+    CHECK_EQ(m.priority.weight_of(a), 63.0);
+    CHECK_EQ(m.priority.weight_of(b), 27.0);
+}
+
+TEST(normalize_is_idempotent) {
+    Model m;
+    const int a = m.life.add(0, "A");
+    const int b = m.life.add(0, "B");
+    m.life.add(0, "C");
+    m.priority.set_weight(a, 45.0);
+    const double before_a = m.priority.weight_of(a);
+    const double before_b = m.priority.weight_of(b);
+
+    m.priority.normalize();
+    m.priority.normalize();
+    CHECK_EQ(m.priority.weight_of(a), before_a);
+    CHECK_EQ(m.priority.weight_of(b), before_b);
 }
 
 TEST(set_weight_keeps_the_set_at_total_and_the_edited_value_exact) {
@@ -86,7 +120,6 @@ TEST(set_weight_scales_siblings_proportionally) {
     const int a = m.life.add(0, "A");
     const int b = m.life.add(0, "B");
     const int c = m.life.add(0, "C");
-    m.priority.set_weight(a, 34.0);  // 34/33/33
     m.priority.set_weight(b, 60.0);  // a and c share 40: 20/20
     m.priority.set_weight(a, 10.0);  // b and c share 90 in a 60:20 ratio
 
@@ -172,7 +205,6 @@ TEST(unlinked_project_ranks_at_zero_and_unserved_leaf_is_reported) {
     const int unserved = m.life.add(0, "Unserved");
     const int p1 = m.projects.add(0, "P1");
     const int p2 = m.projects.add(0, "P2");
-    m.priority.set_weight(served, 50.0);
     m.priority.set_link(p1, served);
 
     const auto pp = m.priority.project_priorities();

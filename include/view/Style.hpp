@@ -8,80 +8,52 @@
 #include <gdkmm/rgba.h>
 
 namespace Gtk {
+class Label;
 class Widget;
-}
+}  // namespace Gtk
 
-// The rule this file exists to enforce: no color literal anywhere else in
-// the codebase. A widget adds a CSS class, or a draw function asks for a
-// palette. Nothing is cached — caching is how a panel ends up still dark
-// after the theme switches to light.
+// Every color in the app comes through here: widgets add a CSS class, draw
+// functions ask for a palette. Nothing is cached, so a theme switch takes
+// effect on the next frame.
 namespace style {
 
-// Every color the Cairo-drawn panels need, against the theme in force now.
+// Colors for the Cairo-drawn panels, resolved against the current theme.
 struct Palette {
-    // The one value approximated rather than read from the theme — see
-    // Style.cpp.
-    Gdk::RGBA background;
-
-    // Read straight off the widget. Everything below except accent derives
-    // from this, which is what makes the panels track the theme.
-    Gdk::RGBA text;
-
-    // LifeTree's own, not the theme's. Fixed: an accent that followed the
-    // system accent would stop meaning "the present moment" and start
-    // meaning "selected".
-    Gdk::RGBA accent;
-
-    // Brightest on the hour. Opaque blends toward the background rather
-    // than alpha, so a tick crossing a band doesn't tint it.
+    Gdk::RGBA background;  // approximated, not read from the theme
+    Gdk::RGBA text;        // read from the widget; everything else derives
+    Gdk::RGBA accent;      // LifeTree's own, fixed: marks "now"
     Gdk::RGBA tick_major;
     Gdk::RGBA tick_minor;
     Gdk::RGBA tick_faint;
-
-    // For a band whose project has no color. Neutral so it never competes
-    // with accent.
-    Gdk::RGBA band_fallback;
-
-    // True when the theme's text is light, i.e. a dark variant is in force.
+    Gdk::RGBA band_fallback;  // for a band whose project has no color
     bool dark = false;
 };
 
-// The fixed palette a project's color is chosen from, as "#RRGGBB". Literal
-// while everything else here is derived, because a project color is user
-// data written to the database — it can't shift when the theme does.
-//
-// Ordered by how distinct each one is from the ones before it, so picking
-// down the list is picking the best-separated set of that size. The
-// separation falls off a cliff — see Style.cpp.
+// Project colors as "#RRGGBB", ordered by perceptual distance from the ones
+// before, so the first N are the best-separated set of that size. Fixed
+// values: they're stored in the database and can't follow the theme.
 std::vector<const char*> project_swatches();
 
-// A life tree leaf some project is aimed at. The app's one color that means
-// a STATE rather than an identity — everything else colored is colored to
-// say which thing it is. Nothing marks an unserved leaf: plain text already
-// reads as the absence, and a second color would make not having got to
-// something yet look like an error.
-//
-// The same value the .leaf-served CSS class carries; this is for CardRow,
-// which colors through Pango markup rather than a class.
+// Marks a life leaf some project serves. Same value as the .leaf-served
+// CSS class, for code that colors through Pango markup.
 const char* served_hex();
 
-// Installs the application stylesheet display-wide. Call once, before the
-// first window is shown.
+// Installs the stylesheet display-wide. Call once before the first window.
 void install();
 
-// Call INSIDE a draw function, every time, and don't store the result. It
-// costs nothing next to a repaint, and per-draw means a theme change needs
-// no invalidation: the next frame is simply correct.
+// Call inside a draw function every time; don't store the result.
 Palette palette_for(const Gtk::Widget& widget);
 
-// "#RRGGBB" -> a color, or fallback if empty or malformed. The boundary
-// where stored project colors become drawable ones.
+// "#RRGGBB" -> color, or fallback if empty or malformed.
 Gdk::RGBA parse_hex(const std::string& hex, const Gdk::RGBA& fallback);
 
-// set_source_rgba with a Gdk::RGBA. alpha multiplies the color's own, so a
-// translucent source stays translucent rather than being overridden.
+// set_source_rgba with a Gdk::RGBA; alpha multiplies the color's own.
 void set_source(const Cairo::RefPtr<Cairo::Context>& cr, const Gdk::RGBA& color,
                 double alpha = 1.0);
+
+// Sets the label's text tinted with hex_color; plain text if the color is
+// empty. Escapes the text.
+void set_colored_text(Gtk::Label& label, const std::string& text, const std::string& hex_color);
 
 }  // namespace style
 

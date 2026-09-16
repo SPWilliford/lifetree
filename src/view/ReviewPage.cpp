@@ -1,4 +1,4 @@
-#include "view/ReviewPanel.hpp"
+#include "view/ReviewPage.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -6,15 +6,16 @@
 
 #include <glibmm/markup.h>
 
+#include "core/Clock.hpp"
 #include "core/Priority.hpp"
+#include "core/Tree.hpp"
 #include "core/TreeController.hpp"
 #include "core/Work.hpp"
+#include "view/Style.hpp"
 
 namespace {
 
-// "2h 05m", or "12m" under the hour. Minutes only below an hour because a
-// review is read at a glance and "0h 12m" spends two characters saying the
-// hour is zero.
+// "2h 05m", or "12m" under the hour.
 std::string duration_text(double seconds) {
     const long total = static_cast<long>(seconds + 0.5);
     char buf[32];
@@ -32,18 +33,6 @@ std::string percent_text(double value) {
     return buf;
 }
 
-// Same treatment TaskPanel gives backlog rows: the project's color at full
-// strength on the title, so a row is recognizable as the same task in
-// whichever panel it turns up in.
-void set_colored_text(Gtk::Label& label, const std::string& text, const std::string& color) {
-    if (!color.empty() && !text.empty()) {
-        label.set_markup("<span foreground='" + color + "'>" + Glib::Markup::escape_text(text) +
-                         "</span>");
-    } else {
-        label.set_text(text);
-    }
-}
-
 Gtk::Label* dim_label(const std::string& text, Gtk::Align align) {
     auto* label = Gtk::make_managed<Gtk::Label>(text);
     label->add_css_class("dim-label");
@@ -51,20 +40,15 @@ Gtk::Label* dim_label(const std::string& text, Gtk::Align align) {
     return label;
 }
 
-constexpr int ROOT_ID = 0;
-
-// A day is stepped from noon so a 23-hour or 25-hour DST day can't land the
-// result back inside the day it started in, or skip one entirely.
+// Days are stepped from noon so a 23- or 25-hour DST day can't land back in
+// the same day or skip one.
 constexpr int NOON_HOUR = 12;
 
-// The column the whole review is set in. Wide enough for a long goal title
-// beside its figures, narrow enough that the two ends of a row still read
-// as one row on a maximized window.
 constexpr int MEASURE = 820;
 
 }  // namespace
 
-ReviewPanel::ReviewPanel(TreeController& life, Priority& priority, Work& work)
+ReviewPage::ReviewPage(TreeController& life, Priority& priority, Work& work)
     : Gtk::Box(Gtk::Orientation::VERTICAL, 12),
       m_life(life),
       m_priority(priority),
@@ -76,13 +60,8 @@ ReviewPanel::ReviewPanel(TreeController& life, Priority& priority, Work& work)
     set_hexpand(true);
     set_vexpand(true);
 
-    for (auto* button : {&m_prev_day, &m_next_day}) {
-        button->set_has_frame(false);
-    }
-    m_today.set_has_frame(false);
+    for (auto* button : {&m_prev_day, &m_next_day, &m_today}) button->set_has_frame(false);
 
-    // A fixed width keeps the date's box from resizing as the text changes,
-    // so the arrows don't shuffle sideways between days.
     m_day_label.set_width_chars(22);
     m_day_label.set_halign(Gtk::Align::CENTER);
 
@@ -109,8 +88,6 @@ ReviewPanel::ReviewPanel(TreeController& life, Priority& priority, Work& work)
     m_scroll.set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
     append(m_scroll);
 
-    // A weight moving changes what the day's time is compared against, even
-    // though the day itself didn't change.
     m_work.connect_changed([this]() { m_refresh.request(); });
     m_priority.connect_changed([this]() { m_refresh.request(); });
     m_life.connect_changed([this]() { m_refresh.request(); });
@@ -118,31 +95,24 @@ ReviewPanel::ReviewPanel(TreeController& life, Priority& priority, Work& work)
     rebuild();
 }
 
-void ReviewPanel::step_day(int days) {
-    std::tm tm_buf{};
-    localtime_r(&m_day, &tm_buf);
+void ReviewPage::step_day(int days) {
+    std::tm tm_buf = clock_util::local_tm(m_day);
     tm_buf.tm_hour = NOON_HOUR;
     tm_buf.tm_min = 0;
     tm_buf.tm_sec = 0;
     tm_buf.tm_mday += days;
-    tm_buf.tm_isdst = -1;  // let mktime work out the offset for the new date
+    tm_buf.tm_isdst = -1;
     m_day = std::mktime(&tm_buf);
     m_refresh.request();
 }
 
-void ReviewPanel::rebuild() {
-    std::tm tm_buf{};
-    localtime_r(&m_day, &tm_buf);
+void ReviewPage::rebuild() {
+    const std::tm tm_buf = clock_util::local_tm(m_day);
     char date[64];
     std::strftime(date, sizeof(date), "%A, %B %e", &tm_buf);
     m_day_label.set_text(date);
 
-    // Forward is blocked rather than hidden: a disabled arrow says the
-    // control exists and today is the edge, where a vanishing one just
-    // looks like the layout shifted.
-    const time_t now = std::time(nullptr);
-    std::tm now_tm{};
-    localtime_r(&now, &now_tm);
+    const std::tm now_tm = clock_util::local_tm(std::time(nullptr));
     const bool on_today = (tm_buf.tm_year == now_tm.tm_year && tm_buf.tm_yday == now_tm.tm_yday);
     m_next_day.set_sensitive(!on_today);
     m_today.set_sensitive(!on_today);
@@ -154,7 +124,7 @@ void ReviewPanel::rebuild() {
     build_unserved();
 }
 
-Gtk::Box& ReviewPanel::append_section(const std::string& title, const std::string& subtitle) {
+Gtk::Box& ReviewPage::append_section(const std::string& title, const std::string& subtitle) {
     auto* section = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
     section->set_hexpand(true);
 
@@ -174,8 +144,8 @@ Gtk::Box& ReviewPanel::append_section(const std::string& title, const std::strin
     return *section;
 }
 
-Gtk::Widget& ReviewPanel::make_path_title(const std::string& path, const std::string& title,
-                                          const std::string& color) {
+Gtk::Widget& ReviewPage::make_path_title(const std::string& path, const std::string& title,
+                                         const std::string& color) {
     auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 0);
     box->set_hexpand(true);
     box->set_halign(Gtk::Align::START);
@@ -183,20 +153,20 @@ Gtk::Widget& ReviewPanel::make_path_title(const std::string& path, const std::st
     if (!path.empty()) {
         auto* path_label = Gtk::make_managed<Gtk::Label>();
         path_label->set_halign(Gtk::Align::START);
-        set_colored_text(*path_label, path + " - ", color);
+        style::set_colored_text(*path_label, path + " - ", color);
         if (color.empty()) path_label->add_css_class("dim-label");
         box->append(*path_label);
     }
 
     auto* title_label = Gtk::make_managed<Gtk::Label>();
     title_label->set_halign(Gtk::Align::START);
-    set_colored_text(*title_label, title, color);
+    style::set_colored_text(*title_label, title, color);
     box->append(*title_label);
 
     return *box;
 }
 
-Gtk::Grid& ReviewPanel::make_rows(Gtk::Box& section) {
+Gtk::Grid& ReviewPage::make_rows(Gtk::Box& section) {
     auto* grid = Gtk::make_managed<Gtk::Grid>();
     grid->set_row_spacing(2);
     grid->set_column_spacing(16);
@@ -205,7 +175,7 @@ Gtk::Grid& ReviewPanel::make_rows(Gtk::Box& section) {
     return *grid;
 }
 
-void ReviewPanel::build_finished() {
+void ReviewPage::build_finished() {
     auto& section = append_section(
         "Finished", "Tasks completed on this day, with the time banked against each.");
 
@@ -220,14 +190,10 @@ void ReviewPanel::build_finished() {
     int row = 0;
     long total = 0;
     for (const auto& entry : entries) {
-        // Path then title, same shape as the backlog. The snapshot is what
-        // was captured when the work happened, so a task completed under a
-        // project that has since been renamed still reads as it did then.
         grid.attach(make_path_title(entry.path, entry.title, entry.color), 0, row);
         grid.attach(
             *dim_label(duration_text(static_cast<double>(entry.total_seconds)), Gtk::Align::END), 1,
             row);
-
         total += entry.total_seconds;
         ++row;
     }
@@ -241,7 +207,7 @@ void ReviewPanel::build_finished() {
     section.append(*footer);
 }
 
-std::unordered_map<int, double> ReviewPanel::seconds_by_leaf(double& unattributed) const {
+std::unordered_map<int, double> ReviewPage::seconds_by_leaf(double& unattributed) const {
     std::unordered_map<int, double> out;
     unattributed = 0.0;
 
@@ -249,18 +215,15 @@ std::unordered_map<int, double> ReviewPanel::seconds_by_leaf(double& unattribute
         const double seconds = static_cast<double>(entry.end_time - entry.start_time);
         if (seconds <= 0.0) continue;
 
-        // -1 on segments written before the column existed, and on time
-        // that had no project root to begin with. See WorkLogRow.
         if (entry.project_root_id < 0) {
             unattributed += seconds;
             continue;
         }
 
+        // Normalized against the shares present, not TOTAL: a link whose
+        // leaf gained children is skipped by Priority, and the whole segment
+        // should still be attributed.
         const auto leaves = m_priority.leaves_for(entry.project_root_id);
-
-        // By the shares present, not TOTAL: a link whose leaf has gained
-        // children is skipped by Priority's leaf guard, and normalizing
-        // against what's left keeps the whole segment attributed.
         double present = 0.0;
         for (int leaf : leaves) present += m_priority.project_share(entry.project_root_id, leaf);
 
@@ -278,18 +241,18 @@ std::unordered_map<int, double> ReviewPanel::seconds_by_leaf(double& unattribute
     return out;
 }
 
-int ReviewPanel::top_branch_of(int leaf_id) const {
+int ReviewPage::top_branch_of(int leaf_id) const {
     if (!m_life.contains(leaf_id)) return -1;
 
     int current = leaf_id;
-    for (int parent = m_life.parent_of(current); parent > ROOT_ID;
+    for (int parent = m_life.parent_of(current); parent > Tree::ROOT_ID;
          parent = m_life.parent_of(current)) {
         current = parent;
     }
     return current;
 }
 
-void ReviewPanel::build_attribution() {
+void ReviewPage::build_attribution() {
     auto& section = append_section("Where the time went",
                                    "Worked time pushed back through each project's link shares, "
                                    "against the share of the whole you gave that branch.");
@@ -303,10 +266,7 @@ void ReviewPanel::build_attribution() {
         tracked += seconds;
         const int branch = top_branch_of(leaf);
         if (branch < 0) {
-            // The leaf was deleted after the work was logged. The time is
-            // still real, so it moves to unattributed rather than
-            // disappearing from the day's total.
-            unattributed += seconds;
+            unattributed += seconds;  // leaf deleted since the work was logged
             continue;
         }
         by_branch[branch] += seconds;
@@ -319,11 +279,9 @@ void ReviewPanel::build_attribution() {
 
     const auto intended = m_priority.priorities();
 
-    // Every top-level branch appears, worked or not. A branch at zero is
-    // the finding -- dropping empty rows would hide exactly the ones worth
-    // seeing.
+    // Every top-level branch, worked or not: a branch at zero is the finding.
     std::vector<std::pair<int, double>> rows;
-    for (int id : m_life.children_of(ROOT_ID)) {
+    for (int id : m_life.children_of(Tree::ROOT_ID)) {
         auto it = by_branch.find(id);
         rows.emplace_back(id, it != by_branch.end() ? it->second : 0.0);
     }
@@ -354,8 +312,6 @@ void ReviewPanel::build_attribution() {
     }
 
     if (unattributed > 0.0) {
-        // Not a rounding remainder: work on a project that claims no goal,
-        // which is an unserved leaf seen from the other end.
         auto* title = Gtk::make_managed<Gtk::Label>("Not attached to any goal");
         title->set_halign(Gtk::Align::START);
         title->set_hexpand(true);
@@ -368,12 +324,10 @@ void ReviewPanel::build_attribution() {
     }
 }
 
-void ReviewPanel::build_unserved() {
+void ReviewPage::build_unserved() {
     auto& section = append_section("Nothing is serving these",
                                    "Goals carrying priority that no project claims.");
 
-    // Empty means full coverage only if there are leaves to cover — a tree
-    // that's still just a root also returns nothing.
     if (m_life.leaves().empty()) {
         section.append(*dim_label("The life tree has no goals yet.", Gtk::Align::START));
         return;

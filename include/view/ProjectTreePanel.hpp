@@ -1,47 +1,78 @@
 #ifndef PROJECTTREEPANEL_HPP
 #define PROJECTTREEPANEL_HPP
-#include "view/TreePanel.hpp"
 
+#include <unordered_map>
+
+#include <giomm/liststore.h>
+#include <gtkmm/box.h>
+#include <gtkmm/listitem.h>
+#include <gtkmm/listview.h>
+#include <gtkmm/popover.h>
+#include <gtkmm/treelistmodel.h>
+
+#include "view/Refresh.hpp"
+
+class CardRow;
 class TaskAttributes;
-namespace Gtk {
-class Widget;
-}
+class TreeController;
 
-// The projects tree. Rows carry a project color and a marker for whatever
-// makes them not-plain — a date, a repeat, an ordering. The repeat marker
-// shows on a routine's top row only; the rows beneath it may carry their
-// own days, but they are overrides within that routine, not routines.
-//
-// The synthetic root is hidden, so each project is a top-level row, and a
-// trailing "+" row sits where the next one will appear. Starts collapsed:
-// project trees grow, and expanding by default means scrolling past
-// everything to see the top-level list.
-class ProjectTreePanel : public TreePanel {
+// The projects tree as a ListView of CardRows. The synthetic root is hidden,
+// so each project is a top-level row, and a trailing "+" row adds the next.
+class ProjectTreePanel : public Gtk::Box {
 public:
     ProjectTreePanel(TreeController& projects, TaskAttributes& task_attributes);
-
-protected:
-    void seed_root_store() override;
-    bool autoexpand() const override { return false; }
-    std::string root_title() const override { return "Master Project Root"; }
-    void decorate_row(CardRow& card, int id) override;
-    void connect_sources() override;
-    void extend_row_menu(Gtk::Box& menu, Gtk::Popover* popover, int id) override;
-    void on_row_activated(int id) override;
+    ~ProjectTreePanel() override = default;
 
 private:
+    TreeController& m_tree;
     TaskAttributes& m_task_attributes;
 
+    Glib::RefPtr<Gio::ListStore<Glib::Object>> m_root_store;
+    Glib::RefPtr<Gtk::TreeListModel> m_model;
+    Gtk::ListView m_view;
+
+    // Row widgets currently bound, by node id. ListView recycles widgets, so
+    // an entry exists only while its row is on screen.
+    std::unordered_map<int, CardRow*> m_cards;
+
+    Refresh m_refresh{sigc::mem_fun(*this, &ProjectTreePanel::refresh_tree)};
+
+    // Negative ids are rows the display invented (the trailing "+"): not
+    // editable, not deletable, not in the controller.
+    static bool is_synthetic_row(int id) { return id < 0; }
+
+    void initialize_layout();
+    Glib::RefPtr<Gio::ListModel> expand_node(const Glib::RefPtr<Glib::ObjectBase>& item);
+
+    void on_setup(const Glib::RefPtr<Gtk::ListItem>& item);
+    void on_bind(const Glib::RefPtr<Gtk::ListItem>& item);
+    void on_unbind(const Glib::RefPtr<Gtk::ListItem>& item);
+
+    // Everything a row shows. Resets every visual first, so a recycled row
+    // carries nothing over from what it showed last.
+    void apply_row_visuals(CardRow& card, int id);
+
+    void refresh_tree();
+    void restyle_bound_rows();
+
+    // Drops rows whose node is gone: changes made elsewhere (Complete in
+    // SchedulePanel) never touch this panel's stores.
+    void prune_missing();
+
     void add_project();
+    void add_child(const Glib::RefPtr<Gtk::TreeListRow>& row, int parent_id);
+    void delete_node(const Glib::RefPtr<Gtk::TreeListRow>& row, int node_id);
+
+    // Opens a just-created node's editor. Deferred: ListView builds the row
+    // widget in response to the insert, so m_cards has no entry for it yet.
+    void begin_edit_on(int id);
+
+    void show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id);
 
     // Second levels of the row menu, swapped into the still-open popover.
-
-    // The schedule for a whole routine: one line per node in the subtree
-    // under root_id, indented, each with its own seven day toggles. Only
-    // the routine's top node opens this — a node inside one edits its days
-    // here rather than starting a routine of its own.
     Gtk::Widget* build_repeat_config(int root_id, Gtk::Popover* popover);
     Gtk::Widget* build_date_editor(int id, Gtk::Popover* popover);
     Gtk::Widget* build_color_picker(int id, Gtk::Popover* popover);
 };
+
 #endif

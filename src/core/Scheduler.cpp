@@ -5,9 +5,7 @@
 #include <map>
 
 namespace {
-// An unlinked project still holds real tasks, so it goes to the back of
-// the rotation rather than disappearing. "Why is this on your list?" is
-// a question for the review, not something to enforce by hiding work.
+// Floor for unlinked projects, so they rotate rather than vanish.
 constexpr double MIN_SHARE = 0.5;
 }  // namespace
 
@@ -15,8 +13,7 @@ namespace scheduler {
 
 std::vector<int> interleave(const std::vector<Candidate>& candidates,
                             const std::unordered_map<int, double>& project_priorities) {
-    // Ordered map, not unordered: ties break by project id, which is only
-    // repeatable if iteration is.
+    // Ordered maps: ties break by project id, which needs repeatable iteration.
     std::map<int, std::vector<int>> queues;
     for (const auto& candidate : candidates) {
         queues[candidate.project_id].push_back(candidate.task_id);
@@ -36,22 +33,18 @@ std::vector<int> interleave(const std::vector<Candidate>& candidates,
 
     std::map<int, std::size_t> cursor;
     while (true) {
-        // The project owed a turn soonest, among those with work left.
         int chosen = -1;
         double lowest_pass = 0.0;
         for (const auto& [project_id, tasks] : queues) {
             if (cursor[project_id] >= tasks.size()) continue;
-
             const double project_pass = pass.at(project_id);
-            // Strictly-less, so an exact tie keeps whichever project came
-            // first in id order. That's what makes the whole ordering
-            // reproducible rather than dependent on traversal accidents.
+            // Strictly less: an exact tie keeps the lower id.
             if (chosen == -1 || project_pass < lowest_pass) {
                 chosen = project_id;
                 lowest_pass = project_pass;
             }
         }
-        if (chosen == -1) break;  // every queue exhausted
+        if (chosen == -1) break;
 
         ordered.push_back(queues[chosen][cursor[chosen]]);
         ++cursor[chosen];
