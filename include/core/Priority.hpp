@@ -5,148 +5,140 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
 #include <sigc++/signal.h>
+
 #include "core/Database.hpp"
 
 class TreeController;
 
-// Turns what the user says matters into numbers that can be compared.
-//
-// The user weights life tree nodes relative to their siblings, and this
-// cascades those weights from the root down to the leaves. The rule that
-// makes it work: a node passes its ENTIRE priority to its children, so
-// siblings always sum to exactly their parent. Nothing is created or lost
-// on the way down, which is what makes a leaf under "finances" comparable
-// to a leaf under "health" — both are shares of the same 100.
-//
-// Weights are sparse. The user isn't expected to weight every level: they
-// might split the top carefully and leave a whole branch alone. A node
-// with no weight of its own takes an even share of whatever its weighted
-// siblings left unclaimed, so an unfinished tree still produces a complete,
-// correctly-summing set of priorities rather than holes.
-//
-// One consequence worth knowing: because a node's share divides among its
-// children, the SHAPE of the tree is itself a priority signal. A branch
-// split into eight fine-grained leaves spreads its share thin; one with a
-// single leaf concentrates it. That's defensible — more sub-goals really
-// does mean each is a smaller piece — but it means someone who breaks down
-// the areas they've thought hardest about will quietly downweight them.
-// Worth surfacing effective priorities in any planning view so that's
-// visible rather than a surprise.
-//
-// Nothing derived is stored. Priorities are recomputed from the weights on
-// demand, because a stored derived value is a value that drifts.
+// Weights on life tree nodes, cascaded root-to-leaf. A node passes its
+// ENTIRE priority to its children, so siblings always sum to exactly their
+// parent. Nothing derived is stored.
 class Priority {
 public:
-    // What the root holds, and the scale weights are entered on. Both are
-    // 100 so a leaf's priority reads directly as a percentage of the whole
-    // — "this leaf is 12.5" means 12.5% of everything the user cares about.
+    // What the root holds and the scale weights are entered on. 100 so a
+    // leaf's priority reads directly as a percentage of the whole.
     static constexpr double TOTAL = 100.0;
 
     Priority(std::shared_ptr<Database> db, TreeController& life, TreeController& projects);
 
-    // Pulls stored weights into the cache. Call once at startup, after the
-    // life tree itself has loaded.
+    // Call once at startup, after the life tree has loaded.
     void load();
 
-    // How much of its parent's priority this node claims, on a 0..TOTAL
-    // scale. Clamped to that range — a negative weight would let a subtree
-    // take priority away from its siblings, which isn't a thing the model
-    // has any meaning for.
+    // Moves siblings to keep the set summing to TOTAL — proportionally, or
+    // evenly when they're all at zero. The only way weights change.
     void set_weight(int node_id, double weight);
 
-    // Back to "unweighted", which is not the same as a weight of zero: an
-    // unweighted node shares out the remainder with its unweighted
-    // siblings, whereas an explicit zero genuinely claims nothing.
-    void clear_weight(int node_id);
-
-    bool has_weight(int node_id) const;
-
-    // The stored weight, or 0 if there isn't one. Check has_weight() to
-    // tell "unweighted" from "explicitly zero".
+    // The node's share of its parent. Every node has one; the root is TOTAL.
     double weight_of(int node_id) const;
 
-    // Priority for every node in the life tree, computed top-down in a
-    // single pass. Includes intermediate nodes, not just leaves — a
-    // planning view wants to show a branch's total as well as its parts.
-    //
-    // Returns a whole map rather than answering per node because resolving
-    // any one node costs the same walk as resolving all of them. Hold the
-    // result; don't call this in a loop.
+    // Every node's children present and summing to TOTAL, written through.
+    // Runs at load and on every shape change, so a newly added node is never
+    // the one child without a weight. Idempotent.
+    void normalize();
+
+    // Priority for every node, computed top-down in one pass. Returns the
+    // whole map because resolving one node costs the same walk as resolving
+    // all of them — hold the result, don't call this in a loop.
     std::unordered_map<int, double> priorities() const;
 
-    // --- Associations between projects and the leaves they serve ---
+    // --- Links between projects and the goals they serve ---
     //
-    // weight is a rough "how much of this project is really about this
-    // leaf", entered from the project's side because that's the judgement
-    // a person can actually make. It is NOT normalised per project — see
-    // project_priorities() for why the division has to happen per leaf.
-    void set_link(int project_root_id, int leaf_id, double weight);
+    // A link carries two weights running opposite ways round the loop, and
+    // neither can be computed from the other:
+    //
+    //   project_share  how much of this project is about this goal.
+    //                  Sums to TOTAL across a project's links. Attributes
+    //                  logged time back to life branches, so it feeds review.
+    //
+    //   goal_share     how much of this goal this project delivers.
+    //                  Sums to TOTAL across a leaf's projects. Divides the
+    //                  leaf's priority, so it feeds scheduling.
+    //
+    // The axes are independent — a project's shares normalize against its
+    // own other links, a leaf's against other projects — so setting one
+    // direction never disturbs the other.
+    void set_link(int project_root_id, int leaf_id);
+    void set_project_share(int project_root_id, int leaf_id, double share);
+    void set_goal_share(int project_root_id, int leaf_id, double share);
     void clear_link(int project_root_id, int leaf_id);
     bool has_link(int project_root_id, int leaf_id) const;
-    double link_weight(int project_root_id, int leaf_id) const;
+    double project_share(int project_root_id, int leaf_id) const;
+    double goal_share(int project_root_id, int leaf_id) const;
 
     std::vector<int> leaves_for(int project_root_id) const;
     std::vector<int> projects_for(int leaf_id) const;
 
-    // Priority per top-level project. Each leaf divides ITS OWN priority
-    // among the projects serving it, in proportion to their weights —
-    // rather than each project keeping the full priority of everything it
-    // touches, which would count a leaf once per project and inflate the
-    // total past 100.
-    //
-    // The consequence, which will feel wrong the first time: attaching a
-    // second project to a leaf HALVES the first one's contribution from it.
-    // That's correct — wanting to sleep well didn't become twice as
-    // important because you thought of another way to pursue it — but it's
-    // worth saying out loud in any UI that shows these numbers.
-    //
-    // Every top-level project appears, including ones with no links at all.
-    // A project at zero isn't serving anything you said you cared about,
-    // and surfacing that is the point rather than an oversight.
+    // Each leaf divides ITS OWN priority among the projects serving it, so
+    // the total can't exceed TOTAL. Unlinked projects appear at zero — that
+    // one serves nothing you cared about is the finding.
     std::unordered_map<int, double> project_priorities() const;
 
-    // Projects highest-priority first. Ties break by id so the order is
-    // stable across calls rather than shifting with hash iteration.
+    // Highest priority first, ties by id so the order is stable across
+    // calls rather than shifting with hash iteration.
     std::vector<int> ranked_projects() const;
 
-    // Leaves carrying priority that no project serves, highest first.
-    // The payoff of the whole mechanism: "this is 25% of what you said
-    // matters, and nothing you're working on touches it."
+    // The life tree's leaves in the same order, by the same rule. Tree order
+    // is the order you happened to build the tree in; this is the order the
+    // tree says they matter in.
+    std::vector<int> ranked_leaves() const;
+
+    // Leaves carrying priority no project serves, highest first.
     //
-    // Note for whoever builds the review around this: an empty result means
-    // "everything is served" ONLY if the life tree actually has leaves. A
-    // tree that is still just the root also returns nothing here, and
-    // rendering that as full coverage would be exactly backwards for
-    // someone who hasn't defined anything yet.
+    // Empty means full coverage ONLY if the life tree has leaves — a tree
+    // that's still just a root also returns nothing here, and rendering
+    // that as full coverage is backwards.
     std::vector<std::pair<int, double>> unserved_leaves() const;
 
-    // Fires when a weight or an association changes. Coarse, like the
-    // tree's own signal: something moved, re-read what you show.
-    sigc::connection connect_changed(const sigc::slot<void()>& slot) { return m_changed.connect(slot); }
+    // Something moved; re-read what you show. Coarse, like the tree's.
+    sigc::connection connect_changed(const sigc::slot<void()>& slot) {
+        return m_changed.connect(slot);
+    }
 
 private:
-    // Splits one node's priority across its children, writing each child's
-    // result into out. Every branch of this preserves the total exactly.
+    struct LinkWeights {
+        double project_share = 0.0;
+        double goal_share = 0.0;
+    };
+
+    // Both write through to database and cache with no rebalancing and no
+    // signal: every caller is mid-way through restoring an invariant, and
+    // emitting here would publish a half-adjusted set.
+    void write_weight(int node_id, double weight);
+    void write_link(int project_root_id, int leaf_id, const LinkWeights& weights);
+
+    // Restores the summing-to-TOTAL invariant on each axis independently.
+    // Also the migration: links written before goal_share existed arrive at
+    // 0 and come out an even split.
+    void normalize_links();
+
+    // Splits one node's priority across its children into out. Every branch
+    // preserves the total exactly.
     void distribute(int node_id, double budget, std::unordered_map<int, double>& out) const;
 
-    // A node counts as a leaf target only if it currently has no children.
-    // A link to a node that has since gained children is stale: that node's
-    // priority now flows to those children, so honouring the link as well
+    // A link to a node that has since gained children is stale — that
+    // node's priority now flows to its children, so honouring the link too
     // would count the same share twice.
     bool is_leaf_target(int node_id) const;
+
+    // The same guard from the project end. Deleting a project cascades
+    // project_links away on disk but not from m_links, and a dead project
+    // keeps taking a portion of every leaf it served. At point of use rather
+    // than purged on a signal, which can't be reentered mid-mutation.
+    bool is_live_project(int project_root_id) const;
 
     std::shared_ptr<Database> m_db;
     TreeController& m_life;
     TreeController& m_projects;
 
-    // Only nodes the user has explicitly weighted. Absence is meaningful.
+    // Every life node except the root. Complete, not sparse — normalize()
+    // guarantees it, so absence means the node isn't in the tree.
     std::unordered_map<int, double> m_weights;
 
-    // project_root_id -> (leaf_id -> weight). Finding a leaf's projects
-    // means scanning, which is fine at this size and beats keeping a second
-    // index that can fall out of step with this one.
-    std::unordered_map<int, std::unordered_map<int, double>> m_links;
+    // project_root_id -> (leaf_id -> weights). Finding a leaf's projects
+    // means scanning, which beats a second index that can fall out of step.
+    std::unordered_map<int, std::unordered_map<int, LinkWeights>> m_links;
 
     sigc::signal<void()> m_changed;
 };

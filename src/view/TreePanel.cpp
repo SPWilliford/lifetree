@@ -1,809 +1,271 @@
 #include "view/TreePanel.hpp"
-#include "view/CardRow.hpp"
-#include "core/TreeController.hpp"
-#include "core/TaskAttributes.hpp"
-#include "core/Priority.hpp"
-#include <gtkmm/singleselection.h>
-#include <gtkmm/signallistitemfactory.h>
-#include <gtkmm/treeexpander.h>
-#include <gtkmm/popover.h>
-#include <gtkmm/togglebutton.h>
-#include <gtkmm/spinbutton.h>
-#include <gtkmm/checkbutton.h>
-#include <gtkmm/scrolledwindow.h>
-#include <gtkmm/label.h>
-#include <gtkmm/adjustment.h>
-#include <glibmm/main.h>
+
 #include <algorithm>
-#include <vector>
+#include <optional>
 #include <utility>
-#include <array>
-#include <iostream>
-#include <cstdio>
-#include <functional>
-#include <memory>
+#include <vector>
 
-// Flip to 1 while debugging factory binds; 0 for normal use.
-#define TREEPANEL_DEBUG 0
-#if TREEPANEL_DEBUG
-#define TP_LOG(x) std::cout << x << std::endl
-#else
-#define TP_LOG(x)
-#endif
+#include <glibmm/main.h>
+#include <gtkmm/button.h>
+#include <gtkmm/popover.h>
+#include <gtkmm/scrolledwindow.h>
+#include <gtkmm/signallistitemfactory.h>
+#include <gtkmm/singleselection.h>
+#include <gtkmm/treeexpander.h>
 
-TreePanel::TreePanel(TreeController& life, TreeController& projects, TaskAttributes& task_attributes, Priority& priority)
-    : Gtk::Box(Gtk::Orientation::VERTICAL, 12), m_life(life), m_projects(projects), m_task_attributes(task_attributes), m_priority(priority)
-{
+#include "core/TreeController.hpp"
+#include "view/CardRow.hpp"
+
+TreePanel::TreePanel(TreeController& tree)
+    : Gtk::Box(Gtk::Orientation::VERTICAL, 12), m_tree(tree) {}
+
+void TreePanel::build() {
     initialize_layout();
-    bind_actions();
 
-    // Catches changes this panel didn't make itself (e.g. SchedulePanel's
-    // Complete button) — self-made changes already update the relevant
-    // store directly, so this is mostly a no-op in that case, just a
-    // cheap extra scan.
-    m_life.connect_changed([this]() {
-        Glib::signal_idle().connect_once([this]() { prune_missing(TreeType::LIFE); });
-    });
-    m_projects.connect_changed([this]() {
-        Glib::signal_idle().connect_once([this]() { prune_missing(TreeType::PROJECTS); });
-    });
-
-    // Colors and repeat status change how a row looks without touching
-    // the tree, so m_projects' signal above never fires for them and an
-    // already-bound row has no way to know it should re-render.
-    //
-    // Restyling the visible widgets directly rather than poking the
-    // model, because Gio::ListStore offers no public "these items
-    // changed" call — items_changed() is protected, so through the public
-    // API the only way to signal one is to remove and re-append, and GTK
-    // then treats the re-appended items as new and collapses whatever the
-    // user had expanded.
-    //
-    // Projects only: colors and repeating are both Projects concepts. Row
-    // *membership* never changes here either, since this panel shows every
-    // node rather than filtering any out — unlike TaskPanel, whose
-    // backlog excludes generators and so does need a full rebuild.
-    // A weight change moves every priority in the tree, not just the one
-    // edited — the whole cascade shifts, so restyle all visible life rows.
-    m_priority.connect_changed([this]() {
-        Glib::signal_idle().connect_once([this]() { restyle_bound_rows(TreeType::LIFE); });
-    });
-
-    m_task_attributes.connect_changed([this]() {
-        Glib::signal_idle().connect_once([this]() { restyle_bound_rows(TreeType::PROJECTS); });
-    });
+    m_tree.connect_changed([this]() { m_refresh.request(); });
+    connect_sources();
 }
 
 void TreePanel::initialize_layout() {
     set_hexpand(true);
     set_vexpand(true);
 
-    m_switcher.set_stack(m_stack);
-    m_switcher.set_hexpand(true);
-    append(m_switcher);
+    m_model = create_model();
+    setup_factory();
+    m_view.set_model(Gtk::SingleSelection::create(m_model));
+    m_view.set_hexpand(true);
+    m_view.set_vexpand(true);
 
-    m_life_model = create_model(TreeType::LIFE);
-    m_project_model = create_model(TreeType::PROJECTS);
-
-    setup_factory(m_life_view, TreeType::LIFE);
-    m_life_view.set_model(Gtk::SingleSelection::create(m_life_model));
-    m_life_view.set_hexpand(true);
-    m_life_view.set_vexpand(true);
-
-    setup_factory(m_project_view, TreeType::PROJECTS);
-    m_project_view.set_model(Gtk::SingleSelection::create(m_project_model));
-    m_project_view.set_hexpand(true);
-    m_project_view.set_vexpand(true);
-
-    auto* life_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
-    life_scroll->set_child(m_life_view);
-    life_scroll->set_hexpand(true);
-    life_scroll->set_vexpand(true);
-    life_scroll->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
-    life_scroll->set_min_content_width(340); // ScrolledWindow doesn't size to its content by
-                                              // default — without this it'd ask for ~0 width
-
-    auto* project_scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
-    project_scroll->set_child(m_project_view);
-    project_scroll->set_hexpand(true);
-    project_scroll->set_vexpand(true);
-    project_scroll->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
-    project_scroll->set_min_content_width(340);
-
-    m_stack.add(*life_scroll, "life_page", "Life Tree");
-    m_stack.add(*project_scroll, "projects_page", "Projects");
-    m_stack.set_transition_type(Gtk::StackTransitionType::SLIDE_LEFT_RIGHT);
-    m_stack.set_transition_duration(250);
-    m_stack.set_hexpand(true);
-    m_stack.set_vexpand(true);
-    append(m_stack);
-
-    m_new_project_button.set_halign(Gtk::Align::CENTER);
-    append(m_new_project_button);
-
-    // Only meaningful on the Projects tab — hide it otherwise.
-    auto update_new_project_visibility = [this]() {
-        m_new_project_button.set_visible(active_type() == TreeType::PROJECTS);
-    };
-    m_stack.property_visible_child_name().signal_changed().connect(update_new_project_visibility);
-    update_new_project_visibility(); // Life tab is shown first, so this hides it immediately
+    auto* scroll = Gtk::make_managed<Gtk::ScrolledWindow>();
+    scroll->set_child(m_view);
+    scroll->set_hexpand(true);
+    scroll->set_vexpand(true);
+    scroll->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
+    // A ScrolledWindow asks for ~0 width, leaving the paned nothing to size
+    // against. A floor, not a starting width — that's MainWindow's.
+    scroll->set_min_content_width(240);
+    append(*scroll);
 }
 
 // ---------------------------------------------------------------------
-// Small lookup helpers
+// Model
 // ---------------------------------------------------------------------
 
-TreeType TreePanel::active_type() const {
-    return (m_stack.get_visible_child_name() == "projects_page") ? TreeType::PROJECTS : TreeType::LIFE;
+Glib::RefPtr<Gtk::TreeListModel> TreePanel::create_model() {
+    m_root_store = Gio::ListStore<Glib::Object>::create();
+    seed_root_store();
+
+    // passthrough=false: rows arrive as TreeListRow wrappers, which is what
+    // every cast below expects.
+    return Gtk::TreeListModel::create(
+        m_root_store,
+        [this](const Glib::RefPtr<Glib::ObjectBase>& item) { return expand_node(item); },
+        /*passthrough=*/false, autoexpand());
 }
 
-Glib::RefPtr<Gio::ListStore<Glib::Object>>& TreePanel::root_store(TreeType type) {
-    return (type == TreeType::LIFE) ? m_life_root_store : m_project_root_store;
-}
-
-TreeController& TreePanel::controller_for(TreeType type) {
-    return (type == TreeType::LIFE) ? m_life : m_projects;
-}
-
-std::unordered_map<int, CardRow*>& TreePanel::cards_for(TreeType type) {
-    return (type == TreeType::LIFE) ? m_life_cards : m_project_cards;
-}
-
-// ---------------------------------------------------------------------
-// Model plumbing
-// ---------------------------------------------------------------------
-
-Glib::RefPtr<Gtk::TreeListModel> TreePanel::create_model(TreeType type) {
-    auto& store = root_store(type);
-    store = Gio::ListStore<Glib::Object>::create();
-
-    if (type == TreeType::LIFE) {
-        // Life still shows its single root visibly, as "Live a Good Life".
-        store->append(TreeObject::create(0));
-    } else {
-        // Projects hides its synthetic root entirely — the display model
-        // starts one level down, so each real project is a top-level row.
-        for (int id : controller_for(type).children_of(0)) {
-            store->append(TreeObject::create(id));
-        }
-    }
-
-    // Life stays auto-expanded — it's small and meant to always be
-    // visible at a glance. Projects starts collapsed — as project trees
-    // grow, defaulting to expanded would mean scrolling past everything
-    // just to see the top-level list.
-    bool autoexpand = (type == TreeType::LIFE);
-
-    return Gtk::TreeListModel::create(store, [this, type](const Glib::RefPtr<Glib::ObjectBase>& item) {
-        return expand_node(item, type);
-    }, /*passthrough=*/false, autoexpand);
-}
-
-Glib::RefPtr<Gio::ListModel> TreePanel::expand_node(const Glib::RefPtr<Glib::ObjectBase>& item, TreeType type) {
-    auto obj = std::dynamic_pointer_cast<TreeObject>(item);
-    if (!obj) return Glib::RefPtr<Gio::ListModel>();
+Glib::RefPtr<Gio::ListModel> TreePanel::expand_node(const Glib::RefPtr<Glib::ObjectBase>& item) {
+    auto obj = std::dynamic_pointer_cast<NodeItem>(item);
+    if (!obj || is_synthetic_row(obj->node_id())) return Glib::RefPtr<Gio::ListModel>();
 
     auto store = Gio::ListStore<Glib::Object>::create();
-
-    for (int child_id : controller_for(type).children_of(obj->node_id())) {
-        store->append(TreeObject::create(child_id));
+    for (int child_id : m_tree.children_of(obj->node_id())) {
+        store->append(NodeItem::create(child_id));
     }
-
     return store;
 }
 
-void TreePanel::setup_factory(Gtk::ListView& view, TreeType type) {
+void TreePanel::setup_factory() {
     auto factory = Gtk::SignalListItemFactory::create();
     factory->signal_setup().connect(sigc::mem_fun(*this, &TreePanel::on_setup));
-    factory->signal_bind().connect(sigc::bind(sigc::mem_fun(*this, &TreePanel::on_bind), type));
-    factory->signal_unbind().connect(sigc::bind(sigc::mem_fun(*this, &TreePanel::on_unbind), type));
-    view.set_factory(factory);
+    factory->signal_bind().connect(sigc::mem_fun(*this, &TreePanel::on_bind));
+    factory->signal_unbind().connect(sigc::mem_fun(*this, &TreePanel::on_unbind));
+    m_view.set_factory(factory);
 }
 
 // ---------------------------------------------------------------------
 // Factory callbacks
 // ---------------------------------------------------------------------
 
+namespace {
+// The node behind a list item. Empty means the item carries no node at
+// all — which is NOT the same as a negative id, since a synthetic row
+// (the trailing "+") has one and callers do act on it. Returning -1 for
+// both is how activation on the "+" row silently stopped working.
+std::optional<int> node_id_of(const Glib::RefPtr<Gtk::ListItem>& item) {
+    auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(item->get_item());
+    if (!row) return std::nullopt;
+    auto obj = std::dynamic_pointer_cast<NodeItem>(row->get_item());
+    if (!obj) return std::nullopt;
+    return obj->node_id();
+}
+}  // namespace
+
 void TreePanel::on_setup(const Glib::RefPtr<Gtk::ListItem>& item) {
     auto* expander = Gtk::make_managed<Gtk::TreeExpander>();
 
     auto* card = Gtk::make_managed<CardRow>("", [this, item](std::string_view new_text) {
-        auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(item->get_item());
-        if (!row) return;
-        auto obj = std::dynamic_pointer_cast<TreeObject>(row->get_item());
-        if (obj) {
-            controller_for(active_type()).edit(obj->node_id(), new_text);
-        }
+        const auto id = node_id_of(item);
+        if (id && *id >= 0) m_tree.edit(*id, new_text);
     });
 
+    // Connected once here, not per bind: ListView recycles this widget, so
+    // binding per bind stacks one extra call per recycle. Which row it
+    // currently shows is read at fire time.
     card->signal_secondary_clicked().connect([this, item, card]() {
         auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(item->get_item());
-        if (!row) return;
-        auto obj = std::dynamic_pointer_cast<TreeObject>(row->get_item());
-        if (obj) {
-            show_row_menu(*card, row, obj->node_id());
-        }
+        const auto id = node_id_of(item);
+        if (row && id && *id >= 0) show_row_menu(*card, row, *id);
+    });
+
+    card->signal_activated().connect([this, item]() {
+        const auto id = node_id_of(item);
+        if (id) on_row_activated(*id);
+    });
+
+    card->signal_weight_changed().connect([this, item](double value) {
+        const auto id = node_id_of(item);
+        if (!id || *id <= 0) return;
+        // Deferred: the handler rewrites siblings and emits, which restyles
+        // every bound row including this one, mid-handler.
+        const int node = *id;
+        Glib::signal_idle().connect_once([this, node, value]() { on_weight_edited(node, value); });
     });
 
     expander->set_child(*card);
     item->set_child(*expander);
 }
 
-void TreePanel::on_bind(const Glib::RefPtr<Gtk::ListItem>& item, TreeType type) {
+void TreePanel::on_bind(const Glib::RefPtr<Gtk::ListItem>& item) {
     if (!item) return;
-
-    auto* expander = dynamic_cast<Gtk::TreeExpander*>(item->get_child());
-    if (!expander) {
-        TP_LOG("[TreePanel] on_bind: expander widget missing from row");
-        return;
-    }
-
-    auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(item->get_item());
-    if (!row) {
-        TP_LOG("[TreePanel] on_bind: item was not a TreeListRow (unexpected)");
-        return;
-    }
-
-    expander->set_list_row(row);
-    auto obj = std::dynamic_pointer_cast<TreeObject>(row->get_item());
-    if (!obj) {
-        TP_LOG("[TreePanel] on_bind: TreeListRow payload was not a TreeObject");
-        return;
-    }
-
-    auto* card = dynamic_cast<CardRow*>(expander->get_child());
-    if (!card) return;
-
-    cards_for(type)[obj->node_id()] = card;
-    apply_row_visuals(*card, type, obj->node_id());
-}
-
-void TreePanel::on_unbind(const Glib::RefPtr<Gtk::ListItem>& item, TreeType type) {
-    if (!item) return;
-
     auto* expander = dynamic_cast<Gtk::TreeExpander*>(item->get_child());
     if (!expander) return;
 
+    auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(item->get_item());
+    if (!row) return;
+    expander->set_list_row(row);
+
+    auto* card = dynamic_cast<CardRow*>(expander->get_child());
+    auto obj = std::dynamic_pointer_cast<NodeItem>(row->get_item());
+    if (!card || !obj) return;
+
+    m_cards[obj->node_id()] = card;
+    card->set_action(is_synthetic_row(obj->node_id()));
+    apply_row_visuals(*card, obj->node_id());
+}
+
+void TreePanel::on_unbind(const Glib::RefPtr<Gtk::ListItem>& item) {
+    if (!item) return;
+    auto* expander = dynamic_cast<Gtk::TreeExpander*>(item->get_child());
+    if (!expander) return;
     auto* card = dynamic_cast<CardRow*>(expander->get_child());
     if (!card) return;
 
-    auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(item->get_item());
-    if (!row) return;
+    const auto id = node_id_of(item);
+    if (!id) return;
 
-    auto obj = std::dynamic_pointer_cast<TreeObject>(row->get_item());
-    if (!obj) return;
-
-    // Only drop the entry if it still points at *this* widget. Row
-    // widgets get recycled, so a late unbind must not evict a mapping
-    // that a newer bind has already installed for the same id.
-    auto& cards = cards_for(type);
-    auto it = cards.find(obj->node_id());
-    if (it != cards.end() && it->second == card) {
-        cards.erase(it);
-    }
+    // Only drop the entry if it still points at this widget: row widgets are
+    // recycled, so a late unbind must not evict a mapping a newer bind has
+    // already installed for the same id.
+    auto it = m_cards.find(*id);
+    if (it != m_cards.end() && it->second == card) m_cards.erase(it);
 }
 
-void TreePanel::apply_row_visuals(CardRow& card, TreeType type, int id) {
-    auto title = controller_for(type).get_title(id);
-    if (title.empty() && id == 0) {
-        title = (type == TreeType::LIFE) ? "Live a Good Life" : "Master Project Root";
+void TreePanel::apply_row_visuals(CardRow& card, int id) {
+    // An arrow on a node with nothing under it invites a click that opens
+    // an empty level, which reads as "there is more here, collapsed".
+    //
+    // Hidden rather than made non-expandable, which is GTK's own advice for
+    // this: expand_node has to keep returning a store even for a childless
+    // node, because add_child expands the row and appends straight into
+    // that store. Return null and adding the first child to a leaf — the
+    // most common edit there is — silently does nothing.
+    //
+    // Called from apply_row_visuals rather than on_bind alone so the arrow
+    // appears the moment a leaf gains a child, without waiting for a
+    // rebind. The C function because gtkmm 4.10 doesn't wrap this one.
+    // An arrow on a node with nothing under it invites a click that opens an
+    // empty level, which reads as "there is more here, collapsed".
+    //
+    // Marked for the stylesheet rather than hidden here. hide-expander takes
+    // the icon's WIDTH away with it, so a leaf's title slides left until it
+    // sits under its parent's and the indentation stops reading as depth —
+    // and padding it back means naming the arrow's footprint as a number,
+    // which is a guess that has to be re-tuned whenever the icon size moves.
+    // Style.cpp makes it transparent instead, so GTK reserves exactly the
+    // width it always did and nothing has to be measured.
+    //
+    // Set both ways because ListView recycles these widgets.
+    if (auto* expander = dynamic_cast<Gtk::TreeExpander*>(card.get_parent())) {
+        const bool childless = !is_synthetic_row(id) && m_tree.children_of(id).empty();
+        if (childless)
+            expander->add_css_class("leaf-row");
+        else
+            expander->remove_css_class("leaf-row");
     }
-    card.set_text(title);
 
-    if (type == TreeType::PROJECTS) {
-        // Both lookups walk the Projects tree, and the two trees have
-        // independent id spaces — running either against a Life node would
-        // be a coincidental, meaningless hit.
-        // A node can be both — the generator marker wins, since that's the
-        // less obvious property of the two. The ordering arrow trails the
-        // title: leading, it indents the text and reads like tree structure
-        // rather than a note about the row.
-        if (m_task_attributes.is_generator(id)) {
-            card.set_marker("🔁");
-        } else if (m_task_attributes.is_sequential(id)) {
-            card.set_marker("↓", CardRow::MarkerSide::AFTER);
-        } else {
-            card.set_marker("");
-        }
-        card.set_color(m_task_attributes.get_color(id));
-        return;
-    }
-
-    // Life rows carry their resulting priority, so the split is legible at
-    // a glance instead of only inside the weight editor. Recomputes the
-    // cascade per row, which is a full walk of a tree with a handful of
-    // nodes — cheaper than a cache that could go stale.
-    const auto values = m_priority.priorities();
-    auto it = values.find(id);
-    if (it == values.end()) {
-        card.set_marker("");
-    } else {
-        char buf[16];
-        std::snprintf(buf, sizeof(buf), "%.1f%%", it->second);
-        card.set_marker(buf);
-    }
+    // Reset first. ListView recycles row widgets, so anything a subclass
+    // doesn't set would leak in from whatever this row showed last — which
+    // is what lets decorate_row set only what it cares about.
+    card.set_text("");
+    card.set_marker("");
+    card.set_icon("");
     card.set_color("");
-}
+    card.hide_weight();
+    card.set_tooltip_text("");
 
-void TreePanel::restyle_bound_rows(TreeType type) {
-    auto& controller = controller_for(type);
-    for (auto& [id, card] : cards_for(type)) {
-        // A row whose node is already gone is about to be dropped by
-        // prune_missing — don't blank its text in the meantime.
-        if (!controller.contains(id)) continue;
-        apply_row_visuals(*card, type, id);
-    }
-}
-
-// ---------------------------------------------------------------------
-// Row context menu
-// ---------------------------------------------------------------------
-
-void TreePanel::show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id) {
-    TreeType type = active_type();
-
-    auto* popover = Gtk::make_managed<Gtk::Popover>();
-    popover->set_parent(card);
-
-    auto* menu_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
-    menu_box->set_margin(6);
-
-    auto* add_button = Gtk::make_managed<Gtk::Button>("Add child");
-    add_button->signal_clicked().connect([this, type, row, id, popover]() {
-        popover->popdown();
-        // Deferred to idle — add_child() mutates the very row this
-        // popover is parented to, and this callback is still technically
-        // "inside" the popover's own click handling at this point. Same
-        // reentrancy concern every other GTK list-store mutation in this
-        // file already defers for.
-        Glib::signal_idle().connect_once([this, type, row, id]() {
-            add_child(type, row, id);
-        });
-    });
-    menu_box->append(*add_button);
-
-    if (id > 0) { // the root is protected — never offer to delete it
-        auto* delete_button = Gtk::make_managed<Gtk::Button>("Delete");
-        delete_button->signal_clicked().connect([this, type, row, id, popover]() {
-            popover->popdown();
-            // Deferred to idle — delete_node() can destroy the very row
-            // (and CardRow) this popover is parented to. Doing that
-            // synchronously, before the popover has finished closing,
-            // risks tearing down a widget still in use mid-callback —
-            // this is the one that was actually crashing.
-            Glib::signal_idle().connect_once([this, type, row, id]() {
-                delete_node(type, row, id);
-            });
-        });
-        menu_box->append(*delete_button);
+    if (!is_synthetic_row(id)) {
+        auto title = m_tree.get_title(id);
+        if (title.empty() && id == 0) title = root_title();
+        card.set_text(title);
     }
 
-    // Repeating is a task concept — Projects tab only, and never on the
-    // root (which is hidden there anyway, so id is never 0 in practice).
-    if (type == TreeType::PROJECTS && id > 0) {
-        // Marks the parent: its children happen in order. Offered on any
-        // project node with children, at any depth — a chapter broken into
-        // sections is the same shape as a routine broken into steps.
-        if (!m_projects.children_of(id).empty()) {
-            const bool sequential = m_task_attributes.is_sequential(id);
-            auto* seq_button = Gtk::make_managed<Gtk::Button>(
-                sequential ? "Unordered" : "Do in order");
-            seq_button->signal_clicked().connect([this, id, sequential, popover]() {
-                popover->popdown();
-                Glib::signal_idle().connect_once([this, id, sequential]() {
-                    if (sequential) m_task_attributes.unmark_sequential(id);
-                    else            m_task_attributes.mark_sequential(id);
-                });
-            });
-            menu_box->append(*seq_button);
-        }
-
-        if (m_task_attributes.is_generator(id)) {
-            auto* edit_button = Gtk::make_managed<Gtk::Button>("Edit schedule…");
-            edit_button->signal_clicked().connect([this, id, popover]() {
-                popover->set_child(*build_repeat_config(id, popover));
-            });
-            menu_box->append(*edit_button);
-
-            auto* stop_button = Gtk::make_managed<Gtk::Button>("Stop repeating");
-            stop_button->signal_clicked().connect([this, id, popover]() {
-                popover->popdown();
-                Glib::signal_idle().connect_once([this, id]() {
-                    m_task_attributes.unmark_repeating(id);
-                });
-            });
-            menu_box->append(*stop_button);
-        } else {
-            auto* repeat_button = Gtk::make_managed<Gtk::Button>("Make repeating…");
-            repeat_button->signal_clicked().connect([this, id, popover]() {
-                // Swaps the popover's content in place — this is the
-                // "second level" of the menu, reached only from here,
-                // rather than being the first thing you see on right-click.
-                // No tree mutation happens here, just a widget swap, so
-                // no deferral needed for this one.
-                popover->set_child(*build_repeat_config(id, popover));
-            });
-            menu_box->append(*repeat_button);
-        }
-    }
-
-    // Weights are a life tree concept, and never on the root: the root
-    // holds the whole 100 by definition, there's nothing to take a share of.
-    if (type == TreeType::LIFE && id > 0) {
-        auto* weight_button = Gtk::make_managed<Gtk::Button>("Set weight…");
-        weight_button->signal_clicked().connect([this, id, popover]() {
-            popover->set_child(*build_weight_editor(id, popover));
-        });
-        menu_box->append(*weight_button);
-    }
-
-    // Associations hang off a whole project, same as colors — a task
-    // doesn't serve a life goal on its own, the project it belongs to does.
-    if (type == TreeType::PROJECTS && id > 0 && m_projects.parent_of(id) == 0) {
-        auto* supports_button = Gtk::make_managed<Gtk::Button>("Supports…");
-        supports_button->signal_clicked().connect([this, id, popover]() {
-            popover->set_child(*build_link_picker(id, popover));
-        });
-        menu_box->append(*supports_button);
-    }
-
-    // Colors apply to a whole project, not an arbitrary node within it —
-    // only offered on a top-level project (parent is the hidden root).
-    if (type == TreeType::PROJECTS && id > 0 && m_projects.parent_of(id) == 0) {
-        auto* color_button = Gtk::make_managed<Gtk::Button>("Set color…");
-        color_button->signal_clicked().connect([this, id, popover]() {
-            popover->set_child(*build_color_picker(id, popover));
-        });
-        menu_box->append(*color_button);
-    }
-
-    popover->set_child(*menu_box);
-
-    // Deferred to idle rather than unparented directly in the closed
-    // handler — same reentrancy concern as everywhere else GTK list-store
-    // mutations get deferred: this callback is still technically "inside"
-    // the popover's own signal at that point.
-    popover->signal_closed().connect([popover]() {
-        Glib::signal_idle().connect_once([popover]() { popover->unparent(); });
-    });
-
-    popover->popup();
-}
-
-Gtk::Widget* TreePanel::build_repeat_config(int id, Gtk::Popover* popover) {
-    auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    box->set_margin(10);
-
-    // Opens showing what's currently set, so this doubles as the editor —
-    // changing a schedule doesn't mean stopping and starting over. For a
-    // task that isn't yet a generator, repeat_settings gives a zeroed row
-    // and the defaults below apply instead.
-    const bool editing = m_task_attributes.is_generator(id);
-    const RepeatedTaskRow current = m_task_attributes.repeat_settings(id);
-
-    // One toggle per weekday, ordered Sun..Sat to match
-    // RepeatedTaskRow::weekday_mask's bit order (tm_wday: Sunday=0),
-    // so building the mask below needs no reordering.
-    auto* days_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
-    static const char* day_labels[7] = { "S", "M", "T", "W", "T", "F", "S" };
-    auto day_buttons = std::make_shared<std::array<Gtk::ToggleButton*, 7>>();
-    for (int i = 0; i < 7; ++i) {
-        auto* btn = Gtk::make_managed<Gtk::ToggleButton>(day_labels[i]);
-        btn->set_active(editing ? (current.weekday_mask & (1 << i)) != 0
-                                : true); // new generators default to every day
-        days_box->append(*btn);
-        (*day_buttons)[i] = btn;
-    }
-    box->append(*days_box);
-
-    auto count_adjustment = Gtk::Adjustment::create(
-        editing ? current.count_per_day : 1, 1, 20, 1);
-    auto* count_spin = Gtk::make_managed<Gtk::SpinButton>(count_adjustment);
-    box->append(*count_spin);
-
-    // Off by default: most repeating things are opportunities tied to their
-    // day, and a missed one is simply missed. On, they queue up — for the
-    // things that stay owed however late you are.
-    auto* accumulate_check = Gtk::make_managed<Gtk::CheckButton>("Missed ones pile up");
-    accumulate_check->set_active(editing && current.accumulates);
-    box->append(*accumulate_check);
-
-    auto* apply_button = Gtk::make_managed<Gtk::Button>(editing ? "Update" : "Repeat");
-    apply_button->signal_clicked().connect([this, id, day_buttons, count_spin, accumulate_check, popover]() {
-        int mask = 0;
-        for (int i = 0; i < 7; ++i) {
-            if ((*day_buttons)[i]->get_active()) mask |= (1 << i);
-        }
-        int count = count_spin->get_value_as_int();
-        bool accumulates = accumulate_check->get_active();
-        popover->popdown();
-        // All three are plain values, read before deferring — the widgets
-        // themselves live inside this popover and shouldn't be touched from
-        // the deferred callback below, after it's closing.
-        Glib::signal_idle().connect_once([this, id, mask, count, accumulates]() {
-            m_task_attributes.mark_repeating(id, mask, count, accumulates);
-        });
-    });
-    box->append(*apply_button);
-
-    return box;
-}
-
-Gtk::Widget* TreePanel::build_weight_editor(int id, Gtk::Popover* popover) {
-    auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    box->set_margin(10);
-
-    // What this node's siblings have already claimed. A weight is a share
-    // of the parent, so the figure is meaningless without knowing what's
-    // left — 30 is generous among two siblings and stingy among ten.
-    const int parent = m_life.parent_of(id);
-    double claimed = 0.0;
-    int unweighted = 0;
-    for (int sibling : m_life.children_of(parent)) {
-        if (sibling == id) continue;
-        if (m_priority.has_weight(sibling)) claimed += m_priority.weight_of(sibling);
-        else ++unweighted;
-    }
-
-    char summary[160];
-    std::snprintf(summary, sizeof(summary),
-                  "Siblings claim %.0f of 100.%s",
-                  claimed,
-                  unweighted > 0 ? " The rest is shared by the unweighted ones." : "");
-    auto* context_label = Gtk::make_managed<Gtk::Label>(summary);
-    context_label->add_css_class("dim-label");
-    context_label->set_halign(Gtk::Align::START);
-    context_label->set_wrap(true);
-    context_label->set_max_width_chars(32);
-    box->append(*context_label);
-
-    // Starts at the current weight, or at an even share of what's left if
-    // this node has never been weighted — so opening the editor and hitting
-    // Apply changes nothing, rather than silently snapping to zero.
-    const double starting = m_priority.has_weight(id)
-        ? m_priority.weight_of(id)
-        : (unweighted > 0 ? (100.0 - claimed) / (unweighted + 1) : 100.0 - claimed);
-
-    auto adjustment = Gtk::Adjustment::create(starting, 0.0, 100.0, 5.0);
-    auto* weight_spin = Gtk::make_managed<Gtk::SpinButton>(adjustment);
-    weight_spin->set_digits(0);
-    box->append(*weight_spin);
-
-    auto* apply_button = Gtk::make_managed<Gtk::Button>("Apply");
-    apply_button->signal_clicked().connect([this, id, weight_spin, popover]() {
-        const double value = weight_spin->get_value();
-        popover->popdown();
-        // Read the value before deferring — weight_spin lives inside this
-        // popover, which is on its way out by the time the idle runs.
-        Glib::signal_idle().connect_once([this, id, value]() {
-            m_priority.set_weight(id, value);
-        });
-    });
-    box->append(*apply_button);
-
-    if (m_priority.has_weight(id)) {
-        // Not the same as setting zero: cleared means "share the remainder
-        // with my unweighted siblings", zero means "claim nothing".
-        auto* clear_button = Gtk::make_managed<Gtk::Button>("Clear weight");
-        clear_button->signal_clicked().connect([this, id, popover]() {
-            popover->popdown();
-            Glib::signal_idle().connect_once([this, id]() {
-                m_priority.clear_weight(id);
-            });
-        });
-        box->append(*clear_button);
-    }
-
-    return box;
-}
-
-Gtk::Widget* TreePanel::build_link_picker(int id, Gtk::Popover* popover) {
-    auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
-    box->set_margin(6);
-
-    auto* heading = Gtk::make_managed<Gtk::Label>("How much of this project is about each goal?");
-    heading->add_css_class("dim-label");
-    heading->set_halign(Gtk::Align::START);
-    heading->set_wrap(true);
-    heading->set_max_width_chars(38);
-    box->append(*heading);
-
-    // A running total of this project's own shares. Not a rule — the
-    // arithmetic reads each weight against the OTHER projects on the same
-    // goal, not against this project's other weights, so nothing breaks if
-    // it doesn't come to 100. It's here because thinking in "60/40" is what
-    // makes the number answerable, and seeing the sum keeps that honest.
-    auto* total_label = Gtk::make_managed<Gtk::Label>();
-    total_label->add_css_class("dim-label");
-    total_label->set_halign(Gtk::Align::START);
-
-    auto refresh_total = std::make_shared<std::function<void()>>();
-    *refresh_total = [this, id, total_label]() {
-        double sum = 0.0;
-        for (int leaf : m_priority.leaves_for(id)) sum += m_priority.link_weight(id, leaf);
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "These add up to %.0f%%", sum);
-        total_label->set_text(buf);
-    };
-
-    auto* list = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 2);
-
-    // Leaves only. An interior life node's priority belongs to its
-    // children, so linking to one would double-count — Priority ignores
-    // such links, and offering them here would be offering a no-op.
-    std::vector<int> leaves = m_life.leaves();
-    if (leaves.empty()) {
-        auto* empty = Gtk::make_managed<Gtk::Label>("No life goals defined yet.");
-        empty->add_css_class("dim-label");
-        list->append(*empty);
-    }
-
-    for (int leaf : leaves) {
-        std::string path = m_life.ancestor_path(leaf);
-        std::string label = path.empty() ? m_life.get_title(leaf)
-                                         : path + " > " + m_life.get_title(leaf);
-
-        auto* row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 6);
-
-        auto* check = Gtk::make_managed<Gtk::CheckButton>(label);
-        check->set_active(m_priority.has_link(id, leaf));
-        check->set_hexpand(true);
-        check->set_halign(Gtk::Align::START);
-
-        // Full claim by default: a project you have just said serves a goal
-        // is presumed to serve it wholly until you say otherwise. Starting
-        // at a fraction would make every new association quietly weaker
-        // than the ones already there.
-        auto adjustment = Gtk::Adjustment::create(
-            m_priority.has_link(id, leaf) ? m_priority.link_weight(id, leaf) : 100.0,
-            0.0, 100.0, 5.0);
-        auto* weight_spin = Gtk::make_managed<Gtk::SpinButton>(adjustment);
-        weight_spin->set_digits(0);
-        weight_spin->set_sensitive(check->get_active());
-
-        check->signal_toggled().connect([this, id, leaf, check, weight_spin, refresh_total]() {
-            weight_spin->set_sensitive(check->get_active());
-            if (check->get_active()) m_priority.set_link(id, leaf, weight_spin->get_value());
-            else                     m_priority.clear_link(id, leaf);
-            (*refresh_total)();
-        });
-
-        weight_spin->signal_value_changed().connect([this, id, leaf, check, weight_spin, refresh_total]() {
-            // Only writes while the association exists — the spin button
-            // still holds a value when unchecked, and it shouldn't
-            // resurrect a link the user just removed.
-            if (!check->get_active()) return;
-            m_priority.set_link(id, leaf, weight_spin->get_value());
-            (*refresh_total)();
-        });
-
-        row->append(*check);
-        row->append(*weight_spin);
-        list->append(*row);
-    }
-
-    // Grows to fit a short list, scrolls once the life tree gets big
-    // enough that the popover would run off the screen.
-    auto* scroller = Gtk::make_managed<Gtk::ScrolledWindow>();
-    scroller->set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
-    scroller->set_propagate_natural_height(true);
-    scroller->set_max_content_height(320);
-    scroller->set_child(*list);
-    box->append(*scroller);
-
-    (*refresh_total)();
-    box->append(*total_label);
-
-    auto* done_button = Gtk::make_managed<Gtk::Button>("Done");
-    done_button->signal_clicked().connect([popover]() { popover->popdown(); });
-    box->append(*done_button);
-
-    return box;
-}
-
-Gtk::Widget* TreePanel::build_color_picker(int id, Gtk::Popover* popover) {
-    auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    box->set_margin(10);
-
-    // Fixed palette rather than a full color dialog — plain colored
-    // emoji as the button glyphs render as real color with zero custom
-    // drawing or CSS needed (GTK renders emoji glyphs in their native
-    // color regardless of widget styling), matching the same
-    // emoji-as-shorthand pattern already used for the generator marker.
-    auto* swatch_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
-    static const std::pair<const char*, const char*> palette[] = {
-        { "🔴", "#e57373" }, { "🟠", "#ffb74d" }, { "🟡", "#fff176" },
-        { "🟢", "#81c784" }, { "🔵", "#64b5f6" }, { "🟣", "#9575cd" },
-    };
-    for (const auto& [emoji, hex] : palette) {
-        auto* swatch_button = Gtk::make_managed<Gtk::Button>(emoji);
-        std::string hex_str = hex;
-        swatch_button->signal_clicked().connect([this, id, hex_str, popover]() {
-            popover->popdown();
-            Glib::signal_idle().connect_once([this, id, hex_str]() {
-                m_task_attributes.set_project_color(id, hex_str);
-            });
-        });
-        swatch_row->append(*swatch_button);
-    }
-    box->append(*swatch_row);
-
-    auto* clear_button = Gtk::make_managed<Gtk::Button>("Clear color");
-    clear_button->signal_clicked().connect([this, id, popover]() {
-        popover->popdown();
-        Glib::signal_idle().connect_once([this, id]() {
-            m_task_attributes.clear_project_color(id);
-        });
-    });
-    box->append(*clear_button);
-
-    return box;
+    decorate_row(card, id);
 }
 
 // ---------------------------------------------------------------------
-// Button handlers
+// Refresh
 // ---------------------------------------------------------------------
 
-void TreePanel::bind_actions() {
-    m_new_project_button.signal_clicked().connect(sigc::mem_fun(*this, &TreePanel::on_new_project_clicked));
+void TreePanel::refresh_tree() {
+    prune_missing();
+    restyle_bound_rows();
 }
 
-void TreePanel::add_child(TreeType type, const Glib::RefPtr<Gtk::TreeListRow>& row, int parent_id) {
-    if (!row) return;
-
-    // Grab the child store BEFORE add() touches the database below —
-    // that's what guarantees expand_node(), if this is the row's
-    // first-ever expansion, builds its store from the *old* child list
-    // (not yet including the new one). That makes the manual append
-    // below always correct exactly once, whether this row had been
-    // expanded before or not — rather than depending on which case
-    // we're in.
-    row->set_expanded(true);
-    auto store = std::dynamic_pointer_cast<Gio::ListStore<Glib::Object>>(row->get_children());
-
-    int new_id = controller_for(type).add(parent_id, "New Sub-Item");
-    if (new_id == -1) return; // DB write failed — nothing to add to the view
-
-    if (store) {
-        store->append(TreeObject::create(new_id));
+void TreePanel::restyle_bound_rows() {
+    for (auto& [id, card] : m_cards) {
+        if (is_synthetic_row(id)) continue;
+        // Its node is already gone and prune_missing is about to drop the
+        // row — don't blank the text in the meantime.
+        if (!m_tree.contains(id)) continue;
+        apply_row_visuals(*card, id);
     }
 }
 
-void TreePanel::on_new_project_clicked() {
-    int new_id = m_projects.add(0, "New Project");
-    if (new_id == -1) return; // DB write failed — nothing to add to the view
+void TreePanel::prune_missing() {
+    if (!m_model) return;
 
-    root_store(TreeType::PROJECTS)->append(TreeObject::create(new_id));
-    m_stack.set_visible_child("projects_page");
-}
-
-void TreePanel::prune_missing(TreeType type) {
-    auto model = (type == TreeType::LIFE) ? m_life_model : m_project_model;
-    if (!model) return;
-
-    auto& controller = controller_for(type);
-
-    // Collect (store, index) pairs in one forward pass first — removing
-    // while iterating the flattened model would shift indices out from
-    // under later matches.
+    // Collect (store, index) in one forward pass: removing while iterating
+    // the flattened model shifts indices out from under later matches.
     std::vector<std::pair<Glib::RefPtr<Gio::ListStore<Glib::Object>>, unsigned int>> stale;
 
-    unsigned int n = model->get_n_items();
+    const unsigned int n = m_model->get_n_items();
     for (unsigned int i = 0; i < n; ++i) {
-        auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(model->get_object(i));
+        auto row = std::dynamic_pointer_cast<Gtk::TreeListRow>(m_model->get_object(i));
         if (!row) continue;
-        auto obj = std::dynamic_pointer_cast<TreeObject>(row->get_item());
+        auto obj = std::dynamic_pointer_cast<NodeItem>(row->get_item());
         if (!obj) continue;
-        if (controller.contains(obj->node_id())) continue; // still real, leave it
+        if (is_synthetic_row(obj->node_id())) continue;
+        if (m_tree.contains(obj->node_id())) continue;
 
         auto parent_row = row->get_parent();
-        Glib::RefPtr<Gio::ListStore<Glib::Object>> store = parent_row
-            ? std::dynamic_pointer_cast<Gio::ListStore<Glib::Object>>(parent_row->get_children())
-            : root_store(type);
+        Glib::RefPtr<Gio::ListStore<Glib::Object>> store =
+            parent_row ? std::dynamic_pointer_cast<Gio::ListStore<Glib::Object>>(
+                             parent_row->get_children())
+                       : m_root_store;
         if (!store) continue;
 
         for (unsigned int j = 0; j < store->get_n_items(); ++j) {
-            auto candidate = std::dynamic_pointer_cast<TreeObject>(store->get_item(j));
+            auto candidate = std::dynamic_pointer_cast<NodeItem>(store->get_item(j));
             if (candidate && candidate->node_id() == obj->node_id()) {
                 stale.push_back({store, j});
                 break;
@@ -811,32 +273,102 @@ void TreePanel::prune_missing(TreeType type) {
         }
     }
 
-    // Remove highest indices first, and within the same store, so
-    // removing one match doesn't shift the position of another still
-    // waiting to be removed from that same store.
+    // Highest index first within each store, so removing one match doesn't
+    // shift another still waiting.
     std::sort(stale.begin(), stale.end(), [](const auto& a, const auto& b) {
         return a.first.get() == b.first.get() ? a.second > b.second : a.first.get() > b.first.get();
     });
-    for (auto& entry : stale) {
-        entry.first->remove(entry.second);
-    }
+    for (auto& entry : stale) entry.first->remove(entry.second);
 }
 
-void TreePanel::delete_node(TreeType type, const Glib::RefPtr<Gtk::TreeListRow>& row, int node_id) {
-    if (node_id <= 0) return; // protect the root
+// ---------------------------------------------------------------------
+// Row menu
+// ---------------------------------------------------------------------
 
-    controller_for(type).remove(node_id);
+void TreePanel::extend_row_menu(Gtk::Box&, Gtk::Popover*, int) {}
+void TreePanel::on_row_activated(int) {}
+void TreePanel::on_weight_edited(int, double) {}
+
+void TreePanel::show_row_menu(CardRow& card, const Glib::RefPtr<Gtk::TreeListRow>& row, int id) {
+    auto* popover = Gtk::make_managed<Gtk::Popover>();
+    popover->set_parent(card);
+
+    auto* menu_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 4);
+    menu_box->set_margin(6);
+
+    // Every mutation here is deferred to an idle: the callback is still
+    // inside the popover's own click handling, and add_child/delete_node
+    // mutate — or destroy — the row this popover is parented to.
+    auto* add_button = Gtk::make_managed<Gtk::Button>("Add child");
+    add_button->signal_clicked().connect([this, row, id, popover]() {
+        popover->popdown();
+        Glib::signal_idle().connect_once([this, row, id]() { add_child(row, id); });
+    });
+    menu_box->append(*add_button);
+
+    if (id > 0) {  // the root is protected
+        auto* delete_button = Gtk::make_managed<Gtk::Button>("Delete");
+        delete_button->signal_clicked().connect([this, row, id, popover]() {
+            popover->popdown();
+            Glib::signal_idle().connect_once([this, row, id]() { delete_node(row, id); });
+        });
+        menu_box->append(*delete_button);
+    }
+
+    extend_row_menu(*menu_box, popover, id);
+
+    popover->set_child(*menu_box);
+    popover->signal_closed().connect(
+        [popover]() { Glib::signal_idle().connect_once([popover]() { popover->unparent(); }); });
+    popover->popup();
+}
+
+void TreePanel::add_child(const Glib::RefPtr<Gtk::TreeListRow>& row, int parent_id) {
+    if (!row) return;
+
+    // Grab the child store BEFORE add() writes: if this is the row's first
+    // expansion, expand_node then builds it from the old child list, so the
+    // append below is correct exactly once either way.
+    row->set_expanded(true);
+    auto store = std::dynamic_pointer_cast<Gio::ListStore<Glib::Object>>(row->get_children());
+
+    // Untitled, not "New Sub-Item": the editor opens on it immediately, so a
+    // placeholder would only be text to select and delete before typing.
+    // Abandoning it leaves a blank row rather than removing the node —
+    // deleting something you just made, because you clicked elsewhere, is
+    // the worse surprise.
+    int new_id = m_tree.add(parent_id, "");
+    if (new_id == -1) return;
+    if (store) store->append(NodeItem::create(new_id));
+
+    begin_edit_on(new_id);
+}
+
+// A row only has a widget while it's on screen, so this quietly does nothing
+// for a node created below the fold. The node still exists and is renamable;
+// it just isn't already waiting for the cursor.
+void TreePanel::begin_edit_on(int id) {
+    Glib::signal_idle().connect_once([this, id]() {
+        auto it = m_cards.find(id);
+        if (it != m_cards.end() && it->second) it->second->begin_edit();
+    });
+}
+
+void TreePanel::delete_node(const Glib::RefPtr<Gtk::TreeListRow>& row, int node_id) {
+    if (node_id <= 0) return;
+
+    m_tree.remove(node_id);
 
     if (!row) return;
     auto parent_row = row->get_parent();
-    if (!parent_row) return; // top-level row — prune_missing() (already wired to
-                              // connect_changed) cleans this up from root_store instead
+    if (!parent_row) return;  // top-level: prune_missing clears it from m_root_store
 
-    auto store = std::dynamic_pointer_cast<Gio::ListStore<Glib::Object>>(parent_row->get_children());
+    auto store =
+        std::dynamic_pointer_cast<Gio::ListStore<Glib::Object>>(parent_row->get_children());
     if (!store) return;
 
     for (unsigned int i = 0; i < store->get_n_items(); ++i) {
-        auto obj = std::dynamic_pointer_cast<TreeObject>(store->get_item(i));
+        auto obj = std::dynamic_pointer_cast<NodeItem>(store->get_item(i));
         if (obj && obj->node_id() == node_id) {
             store->remove(i);
             break;

@@ -1,74 +1,109 @@
 #ifndef CARDROW_HPP
 #define CARDROW_HPP
-#include <gtkmm/box.h>
-#include <gtkmm/label.h>
-#include <gtkmm/editablelabel.h>
-#include <sigc++/sigc++.h>
 #include <string>
 #include <string_view>
+
+#include <gtkmm/adjustment.h>
+#include <gtkmm/box.h>
+#include <gtkmm/editablelabel.h>
+#include <gtkmm/image.h>
+#include <gtkmm/label.h>
+#include <gtkmm/spinbutton.h>
+#include <sigc++/sigc++.h>
+// One row of a tree: an optional icon, a marker either side of an editable
+// title, and an optional trailing weight spin.
 class CardRow : public Gtk::Box {
 private:
-    // Stack-allocate your internal elements so they are perfectly memory-safe!
-    // Decoration only, never part of the editable text. Two of them so a
-    // marker can sit on either side of the title without reordering the
-    // box: only one is ever visible at a time.
-    Gtk::Label         m_marker;        // before the title
-    Gtk::Label         m_marker_after;  // after it
+    // Ahead of everything including the leading marker: an icon stands for
+    // the row as a whole, not for its title.
+    Gtk::Image m_icon;
 
-    // Empty, hexpand — soaks up the row's spare width so the trailing
-    // marker stays next to the title instead of being pushed to the far
-    // edge, while the row itself still spans its full width.
-    Gtk::Label         m_spacer;
-    Gtk::Label         m_label;
+    // Decoration only, never part of the editable text. Two so a marker can
+    // sit either side without reordering the box; only one is ever shown.
+    Gtk::Label m_marker;        // before the title
+    Gtk::Label m_marker_after;  // after it
+
+    // Empty, hexpand — soaks up spare width so the trailing marker stays
+    // next to the title while the row still spans its full width.
+    Gtk::Label m_spacer;
+    Gtk::Label m_label;
     Gtk::EditableLabel m_editor;
 
-    // Remembered separately from what m_label actually displays, since
-    // rendering the color means going through set_markup() — text and
-    // color both need to be known together to rebuild that markup
-    // string, regardless of which one last changed.
+    // Kept separately from what m_label displays: coloring goes through
+    // set_markup(), so text and color must both be known to rebuild it,
+    // whichever one changed.
     std::string m_current_text;
-    std::string m_current_color; // "" = no color, plain text
+    std::string m_current_color;  // "" = no color, plain text
     void render_label();
 
     bool m_is_editing = false;
+    bool m_is_action = false;
     sigc::slot<void(std::string_view)> m_on_changed;
     sigc::signal<void()> m_secondary_clicked;
+    sigc::signal<void()> m_activated;
+
+    // Always constructed, shown only on rows with a share to set.
+    Gtk::SpinButton m_weight_spin;
+
+    // Set while set_weight moves the control, so the value-changed handler
+    // doesn't report a refresh as a user edit — which would write the
+    // displayed value back and, with rounding, drift the tree.
+    bool m_setting_weight = false;
+
+    sigc::signal<void(double)> m_weight_changed;
+
 public:
     CardRow(std::string_view initial_text, sigc::slot<void(std::string_view)> on_changed);
     ~CardRow() override = default;
-    // Explicit public accessor so factories can pass text down cleanly!
     void set_text(std::string_view text);
 
-    // Which side of the title a marker sits on. A leading marker reads as
-    // a property of the row — a generator icon, a priority figure — while
-    // a trailing one reads as a note about the title itself. Leading also
-    // indents the text, which is wrong when the row is already nested.
+    // Leading reads as a property of the row and indents the text; trailing
+    // reads as a note about the title and doesn't.
     enum class MarkerSide { BEFORE, AFTER };
 
-    // A small decoration beside the title — empty hides it. Kept entirely
-    // separate from m_label/m_editor on purpose: the editor seeds itself
-    // from whatever the label currently shows, so anything baked into the
-    // title text risks getting saved back as if it were really part of the
-    // title. This never touches that text at all.
+    // Empty hides it. Separate from m_label/m_editor because the editor
+    // seeds from what the label shows — anything baked into the title text
+    // would get saved back as part of the title.
     void set_marker(std::string_view emoji, MarkerSide side = MarkerSide::BEFORE);
 
-    // Tints the title text — "" clears it back to plain. Safe to use
-    // set_markup() under the hood for this (rather than needing a
-    // separate widget, the way the marker does): Gtk::Label::get_text()
-    // already strips markup back to plain text, so the double-click
-    // edit flow (which seeds the editor from get_text()) isn't affected.
+    // Tints the title; "" clears it. set_markup is safe here where it isn't
+    // for the marker: get_text() strips markup, so the edit flow that seeds
+    // from it is unaffected.
     void set_color(const std::string& hex_color);
 
-    // Fired on right-click. Deliberately generic — CardRow doesn't know
-    // what a right-click should *do* (that's the repeating-task menu,
-    // today, but this shouldn't need to change if that grows or a
-    // second thing wants a context menu later); the owner decides.
+    // Fired on right-click. Generic: the owner decides what it means.
     sigc::signal<void()> signal_secondary_clicked() { return m_secondary_clicked; }
 
-    // Toggles the glowing-border/recolored-text look. Not wired to
-    // anything yet — the shared "which task is active" state that will
-    // call this from TreePanel/TaskPanel/SchedulePanel is separate,
-    // later work. This just adds the visual capability on its own.
+    // On the row rather than in a parallel panel because a weight only
+    // means anything against its siblings, and those are the rows above and
+    // below.
+    //
+    // set_weight moves the control without emitting, so a refresh can't be
+    // mistaken for the user turning the dial. depth indents it to match the
+    // title's nesting; siblings share a depth and so still line up.
+    void set_weight(double weight, int depth);
+    void hide_weight();
+    sigc::signal<void(double)> signal_weight_changed() { return m_weight_changed; }
+
+    // Looked up from the icon theme by name; "" hides it. Separate from
+    // set_marker, which is a character in the title's font — symbolic icons
+    // take their color from the surrounding text.
+    void set_icon(std::string_view icon_name);
+
+    // As a double-click would. Public so a just-created row can open ready
+    // to be named.
+    void begin_edit();
+
+    // Left-click, action mode only — see set_action.
+    sigc::signal<void()> signal_activated() { return m_activated; }
+
+    // Turns the row into a button rather than data: click fires
+    // signal_activated, double-click no longer edits. For rows that aren't
+    // nodes — the trailing "+" — where renaming means nothing.
+    void set_action(bool action);
+
+    // The cross-panel active-task highlight. Not wired to anything yet:
+    // the shared "which task is active" state is still to come.
     void set_active(bool active);
 };
 #endif

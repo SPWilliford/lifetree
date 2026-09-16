@@ -1,25 +1,22 @@
 #include "core/Scheduler.hpp"
+
 #include <algorithm>
-#include <map>
 #include <cstddef>
+#include <map>
 
 namespace {
-    // A project with no associations still contains real tasks, so it has
-    // to appear somewhere rather than disappear from the list entirely.
-    // This floor puts it at the back of the rotation without removing it —
-    // "why is this on your list at all?" is a question for the review, not
-    // something to enforce by hiding the work.
-    constexpr double MIN_SHARE = 0.5;
-}
+// An unlinked project still holds real tasks, so it goes to the back of
+// the rotation rather than disappearing. "Why is this on your list?" is
+// a question for the review, not something to enforce by hiding work.
+constexpr double MIN_SHARE = 0.5;
+}  // namespace
 
 namespace scheduler {
 
 std::vector<int> interleave(const std::vector<Candidate>& candidates,
                             const std::unordered_map<int, double>& project_priorities) {
-    // One queue per project, keeping the order candidates arrived in.
-    // Ordered map rather than unordered: ties below are broken by project
-    // id, and that only produces a repeatable result if iteration is
-    // repeatable too.
+    // Ordered map, not unordered: ties break by project id, which is only
+    // repeatable if iteration is.
     std::map<int, std::vector<int>> queues;
     for (const auto& candidate : candidates) {
         queues[candidate.project_id].push_back(candidate.task_id);
@@ -54,7 +51,7 @@ std::vector<int> interleave(const std::vector<Candidate>& candidates,
                 lowest_pass = project_pass;
             }
         }
-        if (chosen == -1) break; // every queue exhausted
+        if (chosen == -1) break;  // every queue exhausted
 
         ordered.push_back(queues[chosen][cursor[chosen]]);
         ++cursor[chosen];
@@ -64,4 +61,4 @@ std::vector<int> interleave(const std::vector<Candidate>& candidates,
     return ordered;
 }
 
-}
+}  // namespace scheduler
