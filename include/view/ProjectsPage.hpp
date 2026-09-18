@@ -5,7 +5,6 @@
 
 #include <gtkmm/box.h>
 #include <gtkmm/grid.h>
-#include <gtkmm/label.h>
 #include <gtkmm/scrolledwindow.h>
 
 #include "view/Refresh.hpp"
@@ -34,8 +33,6 @@ private:
     int m_goal_id = -1;
     int m_project_id = -1;
 
-    Gtk::Label m_goal_hint;
-    Gtk::Label m_project_hint;
     Gtk::Box m_goal_columns{Gtk::Orientation::HORIZONTAL, 12};
     Gtk::Box m_project_columns{Gtk::Orientation::HORIZONTAL, 12};
     Gtk::Box m_goal_section{Gtk::Orientation::VERTICAL, 6};
@@ -56,9 +53,9 @@ private:
     void rebuild();
     void validate_selection();
 
-    void build_section(Gtk::Box& section, Gtk::Label& hint, Gtk::Box& columns,
-                       Gtk::ScrolledWindow& list_scroll, Gtk::ScrolledWindow& links_scroll,
-                       Gtk::Grid& list, Gtk::Grid& links, const std::string& title);
+    void build_section(Gtk::Box& section, Gtk::Box& columns, Gtk::ScrolledWindow& list_scroll,
+                       Gtk::ScrolledWindow& links_scroll, Gtk::Grid& list, Gtk::Grid& links,
+                       const std::string& title);
     void append_selector_row(Gtk::Grid& grid, int row, Axis axis, int id, const std::string& title);
     void append_link_row(Gtk::Grid& grid, int row, Axis axis, int project_id, int leaf_id,
                          const std::string& title);

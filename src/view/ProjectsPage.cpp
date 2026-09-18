@@ -6,6 +6,7 @@
 #include <gtkmm/adjustment.h>
 #include <gtkmm/button.h>
 #include <gtkmm/checkbutton.h>
+#include <gtkmm/label.h>
 #include <gtkmm/separator.h>
 #include <gtkmm/spinbutton.h>
 #include <pangomm/layout.h>
@@ -37,15 +38,15 @@ ProjectsPage::ProjectsPage(TreeController& life, TreeController& projects, Prior
     set_hexpand(true);
     set_vexpand(true);
 
-    build_section(m_goal_section, m_goal_hint, m_goal_columns, m_goal_list_scroll,
-                  m_goal_links_scroll, m_goal_list, m_goal_links, "By goal");
+    build_section(m_goal_section, m_goal_columns, m_goal_list_scroll, m_goal_links_scroll,
+                  m_goal_list, m_goal_links, "By goal");
 
     auto* divider = Gtk::make_managed<Gtk::Separator>(Gtk::Orientation::VERTICAL);
     divider->set_margin_start(4);
     divider->set_margin_end(4);
     append(*divider);
 
-    build_section(m_project_section, m_project_hint, m_project_columns, m_project_list_scroll,
+    build_section(m_project_section, m_project_columns, m_project_list_scroll,
                   m_project_links_scroll, m_project_list, m_project_links, "By project");
 
     m_life.connect_changed([this]() { m_refresh.request(); });
@@ -55,7 +56,7 @@ ProjectsPage::ProjectsPage(TreeController& life, TreeController& projects, Prior
     rebuild();
 }
 
-void ProjectsPage::build_section(Gtk::Box& section, Gtk::Label& hint, Gtk::Box& columns,
+void ProjectsPage::build_section(Gtk::Box& section, Gtk::Box& columns,
                                  Gtk::ScrolledWindow& list_scroll,
                                  Gtk::ScrolledWindow& links_scroll, Gtk::Grid& list,
                                  Gtk::Grid& links, const std::string& title) {
@@ -64,10 +65,6 @@ void ProjectsPage::build_section(Gtk::Box& section, Gtk::Label& hint, Gtk::Box& 
     heading->add_css_class("heading");
     heading->set_halign(Gtk::Align::START);
     section.append(*heading);
-
-    hint.set_halign(Gtk::Align::START);
-    hint.add_css_class("dim-label");
-    hint.set_ellipsize(Pango::EllipsizeMode::END);
 
     for (auto* grid : {&list, &links}) {
         grid->set_row_spacing(2);
@@ -87,8 +84,6 @@ void ProjectsPage::build_section(Gtk::Box& section, Gtk::Label& hint, Gtk::Box& 
         scroll->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
         scroll->set_min_content_height(SECTION_MIN_HEIGHT);
     }
-
-    section.append(hint);
 
     columns.set_hexpand(true);
     columns.set_vexpand(true);
@@ -133,18 +128,14 @@ void ProjectsPage::rebuild() {
     }
 
     if (m_goal_id < 0) {
-        m_goal_hint.set_text("No goals yet");
         append_empty_note(m_goal_links, "Add a leaf to the life tree");
+    } else if (projects.empty()) {
+        append_empty_note(m_goal_links, "No projects yet");
     } else {
-        m_goal_hint.set_text(m_life.display_title(m_goal_id) + " — 100 across its projects");
-        if (projects.empty()) {
-            append_empty_note(m_goal_links, "No projects yet");
-        } else {
-            row = 0;
-            for (int project : projects) {
-                append_link_row(m_goal_links, row++, Axis::GOAL, project, m_goal_id,
-                                m_projects.display_title(project));
-            }
+        row = 0;
+        for (int project : projects) {
+            append_link_row(m_goal_links, row++, Axis::GOAL, project, m_goal_id,
+                            m_projects.display_title(project));
         }
     }
 
@@ -156,18 +147,14 @@ void ProjectsPage::rebuild() {
     }
 
     if (m_project_id < 0) {
-        m_project_hint.set_text("No projects yet");
         append_empty_note(m_project_links, "Add a project");
+    } else if (leaves.empty()) {
+        append_empty_note(m_project_links, "Add a leaf to the life tree");
     } else {
-        m_project_hint.set_text(m_projects.display_title(m_project_id) + " — 100 across its goals");
-        if (leaves.empty()) {
-            append_empty_note(m_project_links, "Add a leaf to the life tree");
-        } else {
-            row = 0;
-            for (int leaf : leaves) {
-                append_link_row(m_project_links, row++, Axis::PROJECT, m_project_id, leaf,
-                                m_life.display_title(leaf));
-            }
+        row = 0;
+        for (int leaf : leaves) {
+            append_link_row(m_project_links, row++, Axis::PROJECT, m_project_id, leaf,
+                            m_life.display_title(leaf));
         }
     }
 

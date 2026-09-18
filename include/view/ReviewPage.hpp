@@ -17,8 +17,7 @@ class TreeController;
 class Priority;
 class Work;
 
-// One day against what you said mattered: what got finished, where the
-// time went, and which leaves nothing serves. Everything is derived per
+// One day against what you said mattered. Everything is derived per
 // refresh; nothing is stored.
 class ReviewPage : public Gtk::Box {
 public:
@@ -45,21 +44,17 @@ private:
     // widgets, so nothing below it is a member.
     void rebuild();
 
-    Gtk::Box& append_section(const std::string& title, const std::string& subtitle);
+    Gtk::Box& append_section(const std::string& title);
     Gtk::Grid& make_rows(Gtk::Box& section);
     Gtk::Widget& make_path_title(const std::string& path, const std::string& title,
                                  const std::string& color);
 
     void build_finished();
     void build_attribution();
-    void build_unserved();
 
     // The day's worked seconds split across leaves by project_share. Time
     // that can't be attributed lands in the out-parameter.
     std::unordered_map<int, double> seconds_by_leaf(double& unattributed) const;
-
-    // The top-level branch above a leaf, or -1 if the leaf is gone.
-    int top_branch_of(int leaf_id) const;
 
     void step_day(int days);
 

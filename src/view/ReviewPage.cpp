@@ -2,13 +2,14 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <unordered_set>
 #include <vector>
 
 #include <glibmm/markup.h>
+#include <pangomm/layout.h>
 
 #include "core/Clock.hpp"
 #include "core/Priority.hpp"
-#include "core/Tree.hpp"
 #include "core/TreeController.hpp"
 #include "core/Work.hpp"
 #include "view/Style.hpp"
@@ -29,7 +30,7 @@ std::string duration_text(double seconds) {
 
 std::string percent_text(double value) {
     char buf[16];
-    std::snprintf(buf, sizeof(buf), "%.1f%%", value);
+    std::snprintf(buf, sizeof(buf), "%.0f%%", value);
     return buf;
 }
 
@@ -44,7 +45,7 @@ Gtk::Label* dim_label(const std::string& text, Gtk::Align align) {
 // the same day or skip one.
 constexpr int NOON_HOUR = 12;
 
-constexpr int MEASURE = 820;
+constexpr int SIDE_MARGIN = 32;
 
 }  // namespace
 
@@ -79,9 +80,12 @@ ReviewPage::ReviewPage(TreeController& life, Priority& priority, Work& work)
         m_refresh.request();
     });
 
-    m_content.set_halign(Gtk::Align::CENTER);
-    m_content.set_size_request(MEASURE, -1);
+    m_content.set_hexpand(true);
+    m_content.set_vexpand(true);
     m_content.set_margin_top(8);
+    m_content.set_margin_bottom(SIDE_MARGIN);
+    m_content.set_margin_start(SIDE_MARGIN);
+    m_content.set_margin_end(SIDE_MARGIN);
     m_scroll.set_child(m_content);
     m_scroll.set_hexpand(true);
     m_scroll.set_vexpand(true);
@@ -121,24 +125,17 @@ void ReviewPage::rebuild() {
 
     build_finished();
     build_attribution();
-    build_unserved();
 }
 
-Gtk::Box& ReviewPage::append_section(const std::string& title, const std::string& subtitle) {
+Gtk::Box& ReviewPage::append_section(const std::string& title) {
     auto* section = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 6);
     section->set_hexpand(true);
 
     auto* heading = Gtk::make_managed<Gtk::Label>();
     heading->set_markup("<b>" + Glib::Markup::escape_text(title) + "</b>");
     heading->set_halign(Gtk::Align::START);
+    heading->set_margin_bottom(2);
     section->append(*heading);
-
-    if (!subtitle.empty()) {
-        auto* sub = dim_label(subtitle, Gtk::Align::START);
-        sub->set_wrap(true);
-        sub->set_margin_bottom(6);
-        section->append(*sub);
-    }
 
     m_content.append(*section);
     return *section;
@@ -168,20 +165,19 @@ Gtk::Widget& ReviewPage::make_path_title(const std::string& path, const std::str
 
 Gtk::Grid& ReviewPage::make_rows(Gtk::Box& section) {
     auto* grid = Gtk::make_managed<Gtk::Grid>();
-    grid->set_row_spacing(2);
-    grid->set_column_spacing(16);
+    grid->set_row_spacing(8);
+    grid->set_column_spacing(32);
     grid->set_hexpand(true);
     section.append(*grid);
     return *grid;
 }
 
 void ReviewPage::build_finished() {
-    auto& section = append_section(
-        "Finished", "Tasks completed on this day, with the time banked against each.");
+    auto& section = append_section("Finished");
 
     const auto entries = m_work.entries_for_completed_day(m_day);
     if (entries.empty()) {
-        section.append(*dim_label("Nothing completed.", Gtk::Align::START));
+        section.append(*dim_label("Nothing completed", Gtk::Align::START));
         return;
     }
 
@@ -198,9 +194,8 @@ void ReviewPage::build_finished() {
         ++row;
     }
 
-    char summary[96];
-    std::snprintf(summary, sizeof(summary), "%d finished, %s banked.",
-                  static_cast<int>(entries.size()),
+    char summary[64];
+    std::snprintf(summary, sizeof(summary), "%d finished, %s", static_cast<int>(entries.size()),
                   duration_text(static_cast<double>(total)).c_str());
     auto* footer = dim_label(summary, Gtk::Align::END);
     footer->set_margin_top(6);
@@ -241,122 +236,87 @@ std::unordered_map<int, double> ReviewPage::seconds_by_leaf(double& unattributed
     return out;
 }
 
-int ReviewPage::top_branch_of(int leaf_id) const {
-    if (!m_life.contains(leaf_id)) return -1;
-
-    int current = leaf_id;
-    for (int parent = m_life.parent_of(current); parent > Tree::ROOT_ID;
-         parent = m_life.parent_of(current)) {
-        current = parent;
-    }
-    return current;
-}
-
 void ReviewPage::build_attribution() {
-    auto& section = append_section("Where the time went",
-                                   "Worked time pushed back through each project's link shares, "
-                                   "against the share of the whole you gave that branch.");
+    auto& section = append_section("Where the time went");
 
     double unattributed = 0.0;
-    const auto by_leaf = seconds_by_leaf(unattributed);
+    auto by_leaf = seconds_by_leaf(unattributed);
 
-    std::unordered_map<int, double> by_branch;
-    double tracked = unattributed;
-    for (const auto& [leaf, seconds] : by_leaf) {
-        tracked += seconds;
-        const int branch = top_branch_of(leaf);
-        if (branch < 0) {
-            unattributed += seconds;  // leaf deleted since the work was logged
+    const auto leaves = m_life.leaves();
+    const std::unordered_set<int> live(leaves.begin(), leaves.end());
+
+    for (auto it = by_leaf.begin(); it != by_leaf.end();) {
+        if (live.count(it->first) != 0) {
+            ++it;
             continue;
         }
-        by_branch[branch] += seconds;
+        unattributed += it->second;  // leaf deleted since the work was logged
+        it = by_leaf.erase(it);
     }
 
+    double tracked = unattributed;
+    for (const auto& [leaf, seconds] : by_leaf) tracked += seconds;
+
     if (tracked <= 0.0) {
-        section.append(*dim_label("No time tracked on this day.", Gtk::Align::START));
+        section.append(*dim_label("No time tracked", Gtk::Align::START));
         return;
     }
 
     const auto intended = m_priority.priorities();
 
-    // Every top-level branch, worked or not: a branch at zero is the finding.
-    std::vector<std::pair<int, double>> rows;
-    for (int id : m_life.children_of(Tree::ROOT_ID)) {
-        auto it = by_branch.find(id);
-        rows.emplace_back(id, it != by_branch.end() ? it->second : 0.0);
+    // Every leaf, worked or not: a leaf at zero is the finding.
+    struct LeafRow {
+        int id;
+        double seconds;
+        double intended;
+    };
+    std::vector<LeafRow> rows;
+    rows.reserve(leaves.size());
+    for (int id : leaves) {
+        const auto worked = by_leaf.find(id);
+        const auto want = intended.find(id);
+        rows.push_back({id, worked != by_leaf.end() ? worked->second : 0.0,
+                        want != intended.end() ? want->second : 0.0});
     }
-    std::sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) {
-        if (a.second != b.second) return a.second > b.second;
-        return a.first < b.first;
+    std::sort(rows.begin(), rows.end(), [](const LeafRow& a, const LeafRow& b) {
+        if (a.intended != b.intended) return a.intended > b.intended;
+        if (a.seconds != b.seconds) return a.seconds > b.seconds;
+        return a.id < b.id;
     });
 
     auto& grid = make_rows(section);
 
-    int row = 0;
-    for (const auto& [id, seconds] : rows) {
-        auto* title = Gtk::make_managed<Gtk::Label>(m_life.display_title(id));
+    grid.attach(*dim_label("time", Gtk::Align::END), 1, 0);
+    grid.attach(*dim_label("share", Gtk::Align::END), 2, 0);
+    grid.attach(*dim_label("intended", Gtk::Align::END), 3, 0);
+
+    int row = 1;
+    for (const auto& entry : rows) {
+        auto* title = Gtk::make_managed<Gtk::Label>(m_life.display_title(entry.id));
         title->set_halign(Gtk::Align::START);
         title->set_hexpand(true);
+        title->set_ellipsize(Pango::EllipsizeMode::END);
+        const std::string path = m_life.ancestor_path(entry.id);
+        if (!path.empty()) title->set_tooltip_text(path);
         grid.attach(*title, 0, row);
 
-        grid.attach(*dim_label(duration_text(seconds), Gtk::Align::END), 1, row);
+        grid.attach(*dim_label(duration_text(entry.seconds), Gtk::Align::END), 1, row);
 
-        auto* got = Gtk::make_managed<Gtk::Label>(percent_text(100.0 * seconds / tracked));
+        auto* got = Gtk::make_managed<Gtk::Label>(percent_text(100.0 * entry.seconds / tracked));
         got->set_halign(Gtk::Align::END);
         grid.attach(*got, 2, row);
 
-        auto it = intended.find(id);
-        const double want = (it != intended.end()) ? it->second : 0.0;
-        grid.attach(*dim_label("of " + percent_text(want) + " intended", Gtk::Align::END), 3, row);
+        grid.attach(*dim_label(percent_text(entry.intended), Gtk::Align::END), 3, row);
         ++row;
     }
 
     if (unattributed > 0.0) {
-        auto* title = Gtk::make_managed<Gtk::Label>("Not attached to any goal");
-        title->set_halign(Gtk::Align::START);
+        auto* title = dim_label("Other", Gtk::Align::START);
         title->set_hexpand(true);
-        title->add_css_class("dim-label");
         grid.attach(*title, 0, row);
 
         grid.attach(*dim_label(duration_text(unattributed), Gtk::Align::END), 1, row);
         grid.attach(*dim_label(percent_text(100.0 * unattributed / tracked), Gtk::Align::END), 2,
                     row);
     }
-}
-
-void ReviewPage::build_unserved() {
-    auto& section = append_section("Nothing is serving these",
-                                   "Goals carrying priority that no project claims.");
-
-    if (m_life.leaves().empty()) {
-        section.append(*dim_label("The life tree has no goals yet.", Gtk::Align::START));
-        return;
-    }
-
-    const auto unserved = m_priority.unserved_leaves();
-    if (unserved.empty()) {
-        section.append(*dim_label("Every goal has at least one project.", Gtk::Align::START));
-        return;
-    }
-
-    auto& grid = make_rows(section);
-
-    int row = 0;
-    double total = 0.0;
-    for (const auto& [id, share] : unserved) {
-        grid.attach(make_path_title(m_life.ancestor_path(id), m_life.display_title(id), ""), 0,
-                    row);
-
-        auto* value = Gtk::make_managed<Gtk::Label>(percent_text(share));
-        value->set_halign(Gtk::Align::END);
-        grid.attach(*value, 1, row);
-
-        total += share;
-        ++row;
-    }
-
-    auto* footer =
-        dim_label(percent_text(total) + " of what you said matters is unserved.", Gtk::Align::END);
-    footer->set_margin_top(6);
-    section.append(*footer);
 }
