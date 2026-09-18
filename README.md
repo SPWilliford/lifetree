@@ -17,3 +17,8 @@ sudo apt install g++ pkg-config libgtkmm-4.0-dev libsqlite3-dev
 # Fedora
 sudo dnf install gcc-c++ gtkmm4.0-devel sqlite-devel
 ```
+
+```
+make
+./lifetree_app
+```
