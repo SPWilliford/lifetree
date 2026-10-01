@@ -93,12 +93,21 @@ struct LifeWeightRow {
     double weight;
 };
 
-// One project-to-leaf link. See Priority for what each share feeds.
-struct ProjectLinkRow {
-    int project_root_id;
+struct RequirementRow {
+    int id;
+    std::string title;
+};
+
+// position orders a leaf's requirements; each leaf has its own order.
+struct LeafRequirementLinkRow {
     int leaf_id;
-    double project_share;
-    double goal_share;
+    int requirement_id;
+    int position;
+};
+
+struct RequirementProjectLinkRow {
+    int requirement_id;
+    int project_root_id;
 };
 
 // SQLite access. Reads return empty on failure; writes return false and
@@ -170,11 +179,6 @@ public:
     std::vector<RepeatedTaskRow> load_repeated_tasks();
 
     // --- priority ---
-    bool set_project_link(int project_root_id, int leaf_id, double project_share,
-                          double goal_share);
-    bool clear_project_link(int project_root_id, int leaf_id);
-    std::vector<ProjectLinkRow> load_project_links();
-
     bool set_life_weight(int node_id, double weight);
     std::vector<LifeWeightRow> load_life_weights();
 
@@ -182,9 +186,33 @@ public:
     bool clear_project_color(int project_root_id);
     std::vector<ProjectColorRow> load_project_colors();
 
+    // --- requirements ---
+    // Returns the new id, or -1 if the write failed.
+    int insert_requirement(std::string_view title);
+    bool write_requirement_title(int id, std::string_view title);
+    std::vector<RequirementRow> load_requirements();
+
+    // Deletes every requirement no leaf links to, with its project links.
+    bool remove_orphan_requirements();
+
+    // Inserts, or moves an existing link to a new position.
+    bool set_leaf_requirement_link(int leaf_id, int requirement_id, int position);
+    bool clear_leaf_requirement_link(int leaf_id, int requirement_id);
+
+    // Ordered by leaf, then position.
+    std::vector<LeafRequirementLinkRow> load_leaf_requirement_links();
+
+    // Every requirement on from_leaf moves to to_leaf, keeping its order,
+    // after any to_leaf already has. One to_leaf already has is dropped.
+    bool move_leaf_requirement_links(int from_leaf_id, int to_leaf_id);
+
+    bool set_requirement_project_link(int requirement_id, int project_root_id);
+    bool clear_requirement_project_link(int requirement_id, int project_root_id);
+    std::vector<RequirementProjectLinkRow> load_requirement_project_links();
+
 private:
     // Bumped whenever a versioned step is added to migrate().
-    static constexpr int SCHEMA_VERSION = 4;
+    static constexpr int SCHEMA_VERSION = 5;
 
     sqlite3* m_db = nullptr;
 

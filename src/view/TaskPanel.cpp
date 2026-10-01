@@ -15,6 +15,7 @@
 #include <pangomm/layout.h>
 
 #include "core/Priority.hpp"
+#include "core/Requirements.hpp"
 #include "core/Scheduler.hpp"
 #include "core/TaskAttributes.hpp"
 #include "core/Tree.hpp"
@@ -41,17 +42,20 @@ std::string first_available_icon(const std::vector<std::string>& names) {
 
 }  // namespace
 
-TaskPanel::TaskPanel(TreeController& projects, TaskAttributes& task_attributes, Priority& priority)
+TaskPanel::TaskPanel(TreeController& projects, TaskAttributes& task_attributes, Priority& priority,
+                     Requirements& requirements)
     : Gtk::Box(Gtk::Orientation::VERTICAL, 12),
       m_projects(projects),
       m_task_attributes(task_attributes),
-      m_priority(priority) {
+      m_priority(priority),
+      m_requirements(requirements) {
     initialize_layout();
 
     // All three change membership or order; a flat list has no state to
     // lose, so every one is a full rebuild.
     m_projects.connect_changed([this]() { m_refresh.request(); });
     m_priority.connect_changed([this]() { m_refresh.request(); });
+    m_requirements.connect_changed([this]() { m_refresh.request(); });
     m_task_attributes.connect_changed([this]() { m_refresh.request(); });
 
     refresh();
@@ -222,7 +226,8 @@ void TaskPanel::refresh() {
         return a.task_id < b.task_id;
     });
 
-    for (int id : scheduler::interleave(candidates, m_priority.project_priorities())) {
+    const auto shares = m_requirements.project_priorities(m_priority.priorities());
+    for (int id : scheduler::interleave(candidates, shares)) {
         m_store->append(NodeItem::create(id));
     }
 }

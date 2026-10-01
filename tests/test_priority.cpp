@@ -13,14 +13,12 @@ namespace {
 struct Model {
     std::shared_ptr<Database> db = std::make_shared<Database>(":memory:");
     TreeController life{db, TreeType::LIFE};
-    TreeController projects{db, TreeType::PROJECTS};
-    Priority priority{db, life, projects};
+    Priority priority{db, life};
 
     Model() {
         db->insert_root(TreeType::LIFE, "Root");
         db->insert_root(TreeType::PROJECTS, "Root");
         life.load();
-        projects.load();
         priority.load();
         priority.normalize();
         life.connect_changed([this]() { priority.normalize(); });
@@ -160,84 +158,4 @@ TEST(priorities_cascade_and_leaves_sum_to_total) {
     CHECK_NEAR(p.at(a1), 10.0, 1e-9);
     CHECK_NEAR(p.at(a2), 30.0, 1e-9);
     CHECK_NEAR(p.at(a1) + p.at(a2) + p.at(b), Priority::TOTAL, 1e-9);
-}
-
-TEST(links_split_a_goal_between_its_projects) {
-    Model m;
-    const int goal = m.life.add(0, "Goal");
-    const int p1 = m.projects.add(0, "P1");
-    const int p2 = m.projects.add(0, "P2");
-
-    m.priority.set_link(p1, goal);
-    CHECK_EQ(m.priority.goal_share(p1, goal), Priority::TOTAL);
-    CHECK_EQ(m.priority.project_share(p1, goal), Priority::TOTAL);
-
-    m.priority.set_link(p2, goal);
-    CHECK_EQ(m.priority.goal_share(p1, goal), 50.0);
-    CHECK_EQ(m.priority.goal_share(p2, goal), 50.0);
-
-    const auto pp = m.priority.project_priorities();
-    CHECK_NEAR(pp.at(p1), 50.0, 1e-9);
-    CHECK_NEAR(pp.at(p2), 50.0, 1e-9);
-}
-
-TEST(set_goal_share_rebalances_only_that_axis) {
-    Model m;
-    const int g1 = m.life.add(0, "G1");
-    const int g2 = m.life.add(0, "G2");
-    const int p1 = m.projects.add(0, "P1");
-    const int p2 = m.projects.add(0, "P2");
-    m.priority.set_link(p1, g1);
-    m.priority.set_link(p1, g2);
-    m.priority.set_link(p2, g1);
-
-    m.priority.set_goal_share(p1, g1, 80.0);
-    CHECK_EQ(m.priority.goal_share(p1, g1), 80.0);
-    CHECK_EQ(m.priority.goal_share(p2, g1), 20.0);
-    // p1's project axis was not touched by a goal-axis edit.
-    CHECK_EQ(m.priority.project_share(p1, g1), 50.0);
-    CHECK_EQ(m.priority.project_share(p1, g2), 50.0);
-}
-
-TEST(unlinked_project_ranks_at_zero_and_unserved_leaf_is_reported) {
-    Model m;
-    const int served = m.life.add(0, "Served");
-    const int unserved = m.life.add(0, "Unserved");
-    const int p1 = m.projects.add(0, "P1");
-    const int p2 = m.projects.add(0, "P2");
-    m.priority.set_link(p1, served);
-
-    const auto pp = m.priority.project_priorities();
-    CHECK_NEAR(pp.at(p1), 50.0, 1e-9);
-    CHECK_EQ(pp.at(p2), 0.0);
-
-    const auto gaps = m.priority.unserved_leaves();
-    CHECK_EQ(gaps.size(), 1u);
-    CHECK_EQ(gaps.front().first, unserved);
-}
-
-TEST(link_is_dropped_when_its_leaf_gains_children) {
-    Model m;
-    const int goal = m.life.add(0, "Goal");
-    const int p1 = m.projects.add(0, "P1");
-    m.priority.set_link(p1, goal);
-    CHECK(m.priority.has_link(p1, goal));
-
-    m.life.add(goal, "Sub-goal");  // normalize() runs on the tree signal
-    CHECK(!m.priority.has_link(p1, goal));
-    CHECK(m.priority.leaves_for(p1).empty());
-}
-
-TEST(link_is_dropped_when_its_project_is_demoted) {
-    Model m;
-    const int goal = m.life.add(0, "Goal");
-    const int p1 = m.projects.add(0, "P1");
-    const int p2 = m.projects.add(0, "P2");
-    m.priority.set_link(p1, goal);
-    m.priority.set_link(p2, goal);
-    m.projects.remove(p2);
-    m.priority.normalize();
-
-    CHECK_EQ(m.priority.goal_share(p1, goal), Priority::TOTAL);
-    CHECK_EQ(m.priority.projects_for(goal).size(), 1u);
 }

@@ -17,11 +17,11 @@ constexpr int TASK_START = 420;
 
 MainWindow::MainWindow(App& app)
     : m_projects_panel(app.projects(), app.task_attributes()),
-      m_life_tree_page(app.life(), app.priority()),
-      m_projects_page(app.life(), app.projects(), app.priority()),
-      m_review_page(app.life(), app.priority(), app.work()),
+      m_life_tree_page(app.life(), app.priority(), app.requirements()),
+      m_projects_page(app.life(), app.projects(), app.priority(), app.requirements()),
+      m_review_page(app.life(), app.priority(), app.requirements(), app.work()),
       m_schedule_panel(app.projects(), app.work(), app.task_attributes(), app.day()),
-      m_task_panel(app.projects(), app.task_attributes(), app.priority()) {
+      m_task_panel(app.projects(), app.task_attributes(), app.priority(), app.requirements()) {
     set_title("LifeTree");
     set_default_size(WINDOW_WIDTH, WINDOW_HEIGHT);
 

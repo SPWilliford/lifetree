@@ -15,18 +15,20 @@
 
 class TreeController;
 class Priority;
+class Requirements;
 class Work;
 
 // One day against what you said mattered. Everything is derived per
 // refresh; nothing is stored.
 class ReviewPage : public Gtk::Box {
 public:
-    ReviewPage(TreeController& life, Priority& priority, Work& work);
+    ReviewPage(TreeController& life, Priority& priority, Requirements& requirements, Work& work);
     ~ReviewPage() override = default;
 
 private:
     TreeController& m_life;
     Priority& m_priority;
+    Requirements& m_requirements;
     Work& m_work;
 
     // Any instant inside the day being reviewed.
@@ -52,8 +54,9 @@ private:
     void build_finished();
     void build_attribution();
 
-    // The day's worked seconds split across leaves by project_share. Time
-    // that can't be attributed lands in the out-parameter.
+    // The day's worked seconds split across leaves through the requirements
+    // each project serves. Time that can't be attributed lands in the
+    // out-parameter.
     std::unordered_map<int, double> seconds_by_leaf(double& unattributed) const;
 
     void step_day(int days);

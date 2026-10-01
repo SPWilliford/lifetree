@@ -7,6 +7,7 @@
 #include "core/Database.hpp"
 #include "core/Day.hpp"
 #include "core/Priority.hpp"
+#include "core/Requirements.hpp"
 #include "core/TaskAttributes.hpp"
 #include "core/TreeController.hpp"
 #include "core/Work.hpp"
@@ -25,6 +26,7 @@ public:
     Work& work() { return m_work; }
     TaskAttributes& task_attributes() { return m_task_attributes; }
     Priority& priority() { return m_priority; }
+    Requirements& requirements() { return m_requirements; }
     Day& day() { return m_day; }
 
 private:
@@ -35,6 +37,7 @@ private:
     TreeController m_projects;
     TaskAttributes m_task_attributes;
     Priority m_priority;
+    Requirements m_requirements;
     Work m_work;
     Day m_day;
 };

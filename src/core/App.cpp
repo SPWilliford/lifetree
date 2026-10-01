@@ -5,7 +5,8 @@ App::App(const std::string& db_path)
       m_life(m_db, TreeType::LIFE),
       m_projects(m_db, TreeType::PROJECTS),
       m_task_attributes(m_db, m_projects),
-      m_priority(m_db, m_life, m_projects),
+      m_priority(m_db, m_life),
+      m_requirements(m_db, m_life, m_projects),
       m_work(m_db, m_projects, m_task_attributes),
       m_day(m_db) {
     m_db->insert_root(TreeType::LIFE, "Live a Good Life");
@@ -15,8 +16,14 @@ App::App(const std::string& db_path)
     m_projects.load();
     m_task_attributes.load();
     m_priority.load();
+    m_requirements.load();
     m_day.load();
 
     m_priority.normalize();
-    m_life.connect_changed([this]() { m_priority.normalize(); });
+    m_requirements.normalize();
+    m_life.connect_changed([this]() {
+        m_priority.normalize();
+        m_requirements.normalize();
+    });
+    m_projects.connect_changed([this]() { m_requirements.normalize(); });
 }

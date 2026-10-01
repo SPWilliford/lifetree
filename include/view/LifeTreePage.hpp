@@ -3,7 +3,9 @@
 
 #include <gtkmm/box.h>
 #include <gtkmm/editablelabel.h>
+#include <gtkmm/entry.h>
 #include <gtkmm/label.h>
+#include <gtkmm/overlay.h>
 #include <gtkmm/scrolledwindow.h>
 #include <gtkmm/textview.h>
 #include <gtkmm/togglebutton.h>
@@ -13,20 +15,24 @@
 
 class TreeController;
 class Priority;
+class Requirements;
 
 // Where the life tree is defined and weighted: the drawn tree, and beside
-// it the selected node's title and seed over every leaf ranked by its
-// share of the whole.
+// it the selected node's title, seed and requirements over every
+// requirement ranked by its share of the whole.
 class LifeTreePage : public Gtk::Box {
 public:
-    LifeTreePage(TreeController& life, Priority& priority);
+    LifeTreePage(TreeController& life, Priority& priority, Requirements& requirements);
     ~LifeTreePage() override = default;
 
 private:
     TreeController& m_life;
     Priority& m_priority;
+    Requirements& m_requirements;
 
     LifeTreeView m_view;
+    Gtk::Overlay m_tree_overlay;
+    Gtk::ToggleButton m_weights_toggle;
 
     Gtk::Box m_side{Gtk::Orientation::VERTICAL, 8};
 
@@ -53,11 +59,26 @@ private:
     // column is pointed at another node.
     void commit_seed();
 
-    // --- every leaf, ranked ---
-    // A stepper shows a node's share of its PARENT; this shows what that
-    // came to by the time it reached the leaf.
+    // --- the selected leaf's requirements ---
+    // A branch shows the note instead.
+    Gtk::Box m_requirements_box{Gtk::Orientation::VERTICAL, 6};
+    Gtk::Label m_requirements_heading;
+    Gtk::ScrolledWindow m_requirements_scroll;
+    Gtk::Box m_requirement_rows{Gtk::Orientation::VERTICAL, 2};
+    Gtk::Entry m_requirement_entry;
+    Gtk::Box m_suggestions{Gtk::Orientation::VERTICAL, 0};
+    Gtk::Label m_branch_note;
+
+    void rebuild_requirements();
+    void rebuild_suggestions();
+    Gtk::Widget& make_requirement_row(int leaf_id, int requirement_id, int index, int count);
+
+    Refresh m_requirements_refresh{sigc::mem_fun(*this, &LifeTreePage::rebuild_requirements)};
+
+    // --- every requirement, ranked ---
+    // The page's output. A leaf with none yet is listed at its own share.
     Gtk::Box m_ranked_panel{Gtk::Orientation::VERTICAL, 6};
-    Gtk::ToggleButton m_weights_toggle;
+    Gtk::Label m_ranked_heading;
     Gtk::ScrolledWindow m_ranked_scroll;
     Gtk::Box m_ranked{Gtk::Orientation::VERTICAL, 2};
 

@@ -227,12 +227,22 @@ void Database::create_schema() {
         "  weight REAL NOT NULL);");
 
     execute(
-        "CREATE TABLE IF NOT EXISTS project_links ("
-        "  project_root_id INTEGER NOT NULL REFERENCES projects_tree(id) ON DELETE CASCADE, "
+        "CREATE TABLE IF NOT EXISTS requirements ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "  title TEXT NOT NULL);");
+
+    execute(
+        "CREATE TABLE IF NOT EXISTS leaf_requirement_links ("
         "  leaf_id INTEGER NOT NULL REFERENCES life_tree(id) ON DELETE CASCADE, "
-        "  project_share REAL NOT NULL, "
-        "  goal_share REAL NOT NULL DEFAULT 0, "
-        "  PRIMARY KEY (project_root_id, leaf_id));");
+        "  requirement_id INTEGER NOT NULL REFERENCES requirements(id) ON DELETE CASCADE, "
+        "  position INTEGER NOT NULL, "
+        "  PRIMARY KEY (leaf_id, requirement_id));");
+
+    execute(
+        "CREATE TABLE IF NOT EXISTS requirement_project_links ("
+        "  requirement_id INTEGER NOT NULL REFERENCES requirements(id) ON DELETE CASCADE, "
+        "  project_root_id INTEGER NOT NULL REFERENCES projects_tree(id) ON DELETE CASCADE, "
+        "  PRIMARY KEY (requirement_id, project_root_id));");
 }
 
 void Database::migrate() {
@@ -248,9 +258,6 @@ void Database::migrate() {
     if (!has_column("work_log", "project_root_id")) {
         execute("ALTER TABLE work_log ADD COLUMN project_root_id INTEGER NOT NULL DEFAULT -1;");
     }
-    if (!has_column("project_links", "goal_share")) {
-        execute("ALTER TABLE project_links ADD COLUMN goal_share REAL NOT NULL DEFAULT 0;");
-    }
     if (has_column("repeated_tasks", "generator_id")) {
         execute("ALTER TABLE repeated_tasks RENAME COLUMN generator_id TO node_id;");
     }
@@ -261,8 +268,8 @@ void Database::migrate() {
         execute("ALTER TABLE repeated_tasks DROP COLUMN last_spawned_date;");
     }
 
+    // v1 only touched the leaf links table, which v5 drops.
     if (schema_version() < 1) {
-        execute("UPDATE project_links SET weight = 100.0;");
         set_schema_version(1);
     }
 
@@ -281,9 +288,10 @@ void Database::migrate() {
         set_schema_version(4);
     }
 
-    // After the versioned steps: v1 still writes the old column name.
-    if (has_column("project_links", "weight")) {
-        execute("ALTER TABLE project_links RENAME COLUMN weight TO project_share;");
+    // Projects now link to requirements; the old leaf links go.
+    if (schema_version() < 5) {
+        execute("DROP TABLE IF EXISTS project_links;");
+        set_schema_version(5);
     }
 }
 
@@ -732,34 +740,8 @@ std::vector<RepeatedTaskRow> Database::load_repeated_tasks() {
 }
 
 // ---------------------------------------------------------------------
-// Project links and life weights
+// Life weights
 // ---------------------------------------------------------------------
-
-bool Database::set_project_link(int project_root_id, int leaf_id, double project_share,
-                                double goal_share) {
-    return write(m_db,
-                 "INSERT OR REPLACE INTO project_links "
-                 "(project_root_id, leaf_id, project_share, goal_share) VALUES (?, ?, ?, ?);",
-                 project_root_id, leaf_id, project_share, goal_share);
-}
-
-bool Database::clear_project_link(int project_root_id, int leaf_id) {
-    return write(m_db, "DELETE FROM project_links WHERE project_root_id = ? AND leaf_id = ?;",
-                 project_root_id, leaf_id);
-}
-
-std::vector<ProjectLinkRow> Database::load_project_links() {
-    std::vector<ProjectLinkRow> rows;
-    Statement stmt(
-        m_db, "SELECT project_root_id, leaf_id, project_share, goal_share FROM project_links;");
-    if (!stmt) return rows;
-
-    while (stmt.step()) {
-        rows.push_back(
-            {stmt.column_int(0), stmt.column_int(1), stmt.column_double(2), stmt.column_double(3)});
-    }
-    return rows;
-}
 
 bool Database::set_life_weight(int node_id, double weight) {
     return write(m_db, "INSERT OR REPLACE INTO life_weights (node_id, weight) VALUES (?, ?);",
@@ -799,6 +781,109 @@ std::vector<ProjectColorRow> Database::load_project_colors() {
 
     while (stmt.step()) {
         rows.push_back({stmt.column_int(0), stmt.column_text(1)});
+    }
+    return rows;
+}
+
+// ---------------------------------------------------------------------
+// Requirements
+// ---------------------------------------------------------------------
+
+int Database::insert_requirement(std::string_view title) {
+    if (!write(m_db, "INSERT INTO requirements (title) VALUES (?);", title)) return -1;
+    return static_cast<int>(sqlite3_last_insert_rowid(m_db));
+}
+
+bool Database::write_requirement_title(int id, std::string_view title) {
+    return write(m_db, "UPDATE requirements SET title = ? WHERE id = ?;", title, id);
+}
+
+std::vector<RequirementRow> Database::load_requirements() {
+    std::vector<RequirementRow> rows;
+    Statement stmt(m_db, "SELECT id, title FROM requirements ORDER BY id ASC;");
+    if (!stmt) return rows;
+
+    while (stmt.step()) {
+        rows.push_back({stmt.column_int(0), stmt.column_text(1)});
+    }
+    return rows;
+}
+
+bool Database::remove_orphan_requirements() {
+    return write(m_db,
+                 "DELETE FROM requirements WHERE id NOT IN "
+                 "(SELECT requirement_id FROM leaf_requirement_links);");
+}
+
+bool Database::set_leaf_requirement_link(int leaf_id, int requirement_id, int position) {
+    return write(m_db,
+                 "INSERT OR REPLACE INTO leaf_requirement_links "
+                 "(leaf_id, requirement_id, position) VALUES (?, ?, ?);",
+                 leaf_id, requirement_id, position);
+}
+
+bool Database::clear_leaf_requirement_link(int leaf_id, int requirement_id) {
+    return write(m_db,
+                 "DELETE FROM leaf_requirement_links WHERE leaf_id = ? AND requirement_id = ?;",
+                 leaf_id, requirement_id);
+}
+
+std::vector<LeafRequirementLinkRow> Database::load_leaf_requirement_links() {
+    std::vector<LeafRequirementLinkRow> rows;
+    Statement stmt(m_db,
+                   "SELECT leaf_id, requirement_id, position FROM leaf_requirement_links "
+                   "ORDER BY leaf_id ASC, position ASC;");
+    if (!stmt) return rows;
+
+    while (stmt.step()) {
+        rows.push_back({stmt.column_int(0), stmt.column_int(1), stmt.column_int(2)});
+    }
+    return rows;
+}
+
+bool Database::move_leaf_requirement_links(int from_leaf_id, int to_leaf_id) {
+    if (from_leaf_id == to_leaf_id) return true;
+
+    Statement next(m_db,
+                   "SELECT COALESCE(MAX(position) + 1, 0) FROM leaf_requirement_links "
+                   "WHERE leaf_id = ?;");
+    if (!next || !next.bind(to_leaf_id).step()) return false;
+    const int offset = next.column_int(0);
+
+    // OR IGNORE leaves behind only the links to_leaf already has, so the
+    // DELETE that follows loses nothing.
+    if (!write(m_db,
+               "UPDATE OR IGNORE leaf_requirement_links "
+               "SET leaf_id = ?, position = position + ? WHERE leaf_id = ?;",
+               to_leaf_id, offset, from_leaf_id)) {
+        return false;
+    }
+    return write(m_db, "DELETE FROM leaf_requirement_links WHERE leaf_id = ?;", from_leaf_id);
+}
+
+bool Database::set_requirement_project_link(int requirement_id, int project_root_id) {
+    return write(m_db,
+                 "INSERT OR IGNORE INTO requirement_project_links "
+                 "(requirement_id, project_root_id) VALUES (?, ?);",
+                 requirement_id, project_root_id);
+}
+
+bool Database::clear_requirement_project_link(int requirement_id, int project_root_id) {
+    return write(m_db,
+                 "DELETE FROM requirement_project_links "
+                 "WHERE requirement_id = ? AND project_root_id = ?;",
+                 requirement_id, project_root_id);
+}
+
+std::vector<RequirementProjectLinkRow> Database::load_requirement_project_links() {
+    std::vector<RequirementProjectLinkRow> rows;
+    Statement stmt(m_db,
+                   "SELECT requirement_id, project_root_id FROM requirement_project_links "
+                   "ORDER BY requirement_id ASC, project_root_id ASC;");
+    if (!stmt) return rows;
+
+    while (stmt.step()) {
+        rows.push_back({stmt.column_int(0), stmt.column_int(1)});
     }
     return rows;
 }

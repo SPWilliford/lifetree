@@ -128,7 +128,7 @@ listview > row:hover {
   opacity: 1.0;
 }
 
-/* A goal some project serves. On the widget: color inherits down. */
+/* A requirement some project serves. On the widget: color inherits down. */
 .leaf-served {
   color: @lt_served;
 }

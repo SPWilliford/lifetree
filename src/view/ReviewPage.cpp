@@ -10,6 +10,7 @@
 
 #include "core/Clock.hpp"
 #include "core/Priority.hpp"
+#include "core/Requirements.hpp"
 #include "core/TreeController.hpp"
 #include "core/Work.hpp"
 #include "view/Style.hpp"
@@ -49,10 +50,12 @@ constexpr int SIDE_MARGIN = 32;
 
 }  // namespace
 
-ReviewPage::ReviewPage(TreeController& life, Priority& priority, Work& work)
+ReviewPage::ReviewPage(TreeController& life, Priority& priority, Requirements& requirements,
+                       Work& work)
     : Gtk::Box(Gtk::Orientation::VERTICAL, 12),
       m_life(life),
       m_priority(priority),
+      m_requirements(requirements),
       m_work(work),
       m_day(std::time(nullptr)),
       m_prev_day("◀"),
@@ -94,6 +97,7 @@ ReviewPage::ReviewPage(TreeController& life, Priority& priority, Work& work)
 
     m_work.connect_changed([this]() { m_refresh.request(); });
     m_priority.connect_changed([this]() { m_refresh.request(); });
+    m_requirements.connect_changed([this]() { m_refresh.request(); });
     m_life.connect_changed([this]() { m_refresh.request(); });
 
     rebuild();
@@ -205,6 +209,7 @@ void ReviewPage::build_finished() {
 std::unordered_map<int, double> ReviewPage::seconds_by_leaf(double& unattributed) const {
     std::unordered_map<int, double> out;
     unattributed = 0.0;
+    const auto priorities = m_priority.priorities();
 
     for (const auto& entry : m_work.entries_for_day(m_day)) {
         const double seconds = static_cast<double>(entry.end_time - entry.start_time);
@@ -215,22 +220,12 @@ std::unordered_map<int, double> ReviewPage::seconds_by_leaf(double& unattributed
             continue;
         }
 
-        // Normalized against the shares present, not TOTAL: a link whose
-        // leaf gained children is skipped by Priority, and the whole segment
-        // should still be attributed.
-        const auto leaves = m_priority.leaves_for(entry.project_root_id);
-        double present = 0.0;
-        for (int leaf : leaves) present += m_priority.project_share(entry.project_root_id, leaf);
-
-        if (leaves.empty() || present <= 0.0) {
+        const auto split = m_requirements.time_split(entry.project_root_id, priorities);
+        if (split.empty()) {
             unattributed += seconds;
             continue;
         }
-
-        for (int leaf : leaves) {
-            const double share = m_priority.project_share(entry.project_root_id, leaf);
-            if (share > 0.0) out[leaf] += seconds * share / present;
-        }
+        for (const auto& [leaf, fraction] : split) out[leaf] += seconds * fraction;
     }
 
     return out;

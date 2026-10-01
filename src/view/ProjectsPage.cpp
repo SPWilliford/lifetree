@@ -1,24 +1,28 @@
 #include "view/ProjectsPage.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <string>
 
 #include <glibmm/main.h>
-#include <gtkmm/adjustment.h>
 #include <gtkmm/button.h>
 #include <gtkmm/checkbutton.h>
-#include <gtkmm/label.h>
 #include <gtkmm/separator.h>
-#include <gtkmm/spinbutton.h>
 #include <pangomm/layout.h>
 
 #include "core/Priority.hpp"
+#include "core/Requirements.hpp"
 #include "core/Tree.hpp"
 #include "core/TreeController.hpp"
 
 namespace {
 
-constexpr int SECTION_MIN_HEIGHT = 320;
-constexpr int LIST_MIN_WIDTH = 170;
+std::string percent(double share) {
+    char figure[8];
+    std::snprintf(figure, sizeof(figure), "%d%%", static_cast<int>(std::lround(share)));
+    return figure;
+}
 
 Gtk::Label* dim_label(const std::string& text) {
     auto* label = Gtk::make_managed<Gtk::Label>(text);
@@ -30,226 +34,171 @@ Gtk::Label* dim_label(const std::string& text) {
 
 }  // namespace
 
-ProjectsPage::ProjectsPage(TreeController& life, TreeController& projects, Priority& priority)
-    : Gtk::Box(Gtk::Orientation::HORIZONTAL, 12),
+ProjectsPage::ProjectsPage(TreeController& life, TreeController& projects, Priority& priority,
+                           Requirements& requirements)
+    : Gtk::Box(Gtk::Orientation::HORIZONTAL, 0),
       m_life(life),
       m_projects(projects),
-      m_priority(priority) {
+      m_priority(priority),
+      m_requirements(requirements) {
     set_hexpand(true);
     set_vexpand(true);
 
-    build_section(m_goal_section, m_goal_columns, m_goal_list_scroll, m_goal_links_scroll,
-                  m_goal_list, m_goal_links, "By goal");
+    // Two equal halves. The divider sits inside the right one, so it can't
+    // take a third share.
+    set_homogeneous(true);
 
-    auto* divider = Gtk::make_managed<Gtk::Separator>(Gtk::Orientation::VERTICAL);
-    divider->set_margin_start(4);
-    divider->set_margin_end(4);
-    append(*divider);
+    // --- ranked requirements ---
+    auto* heading_row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+    auto* heading = Gtk::make_managed<Gtk::Label>("Requirements");
+    heading->add_css_class("heading");
+    heading->set_halign(Gtk::Align::START);
+    heading->set_hexpand(true);
+    heading_row->append(*heading);
 
-    build_section(m_project_section, m_project_columns, m_project_list_scroll,
-                  m_project_links_scroll, m_project_list, m_project_links, "By project");
+    // The share of everything that has a project behind it.
+    m_covered.add_css_class("dim-label");
+    m_covered.set_tooltip_text("How much of the total has a project behind it");
+    heading_row->append(m_covered);
+
+    m_ranked_scroll.set_child(m_ranked);
+    m_ranked_scroll.set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    m_ranked_scroll.set_vexpand(true);
+
+    m_ranked_section.set_margin_end(12);
+    m_ranked_section.append(*heading_row);
+    m_ranked_section.append(m_ranked_scroll);
+    append(m_ranked_section);
+
+    auto* right_half = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 12);
+    right_half->append(*Gtk::make_managed<Gtk::Separator>(Gtk::Orientation::VERTICAL));
+    right_half->append(m_projects_section);
+    append(*right_half);
+
+    // --- the selected requirement's projects ---
+    m_selected_title.add_css_class("heading");
+    m_selected_title.set_halign(Gtk::Align::START);
+    m_selected_title.set_wrap(true);
+    m_selected_title.set_xalign(0.0);
+
+    m_projects_scroll.set_child(m_project_checks);
+    m_projects_scroll.set_policy(Gtk::PolicyType::NEVER, Gtk::PolicyType::AUTOMATIC);
+    m_projects_scroll.set_vexpand(true);
+
+    m_projects_section.set_hexpand(true);
+    m_projects_section.append(m_selected_title);
+    m_projects_section.append(m_projects_scroll);
 
     m_life.connect_changed([this]() { m_refresh.request(); });
     m_projects.connect_changed([this]() { m_refresh.request(); });
     m_priority.connect_changed([this]() { m_refresh.request(); });
+    m_requirements.connect_changed([this]() { m_refresh.request(); });
 
     rebuild();
 }
 
-void ProjectsPage::build_section(Gtk::Box& section, Gtk::Box& columns,
-                                 Gtk::ScrolledWindow& list_scroll,
-                                 Gtk::ScrolledWindow& links_scroll, Gtk::Grid& list,
-                                 Gtk::Grid& links, const std::string& title) {
-    auto* heading = Gtk::make_managed<Gtk::Label>();
-    heading->set_text(title);
-    heading->add_css_class("heading");
-    heading->set_halign(Gtk::Align::START);
-    section.append(*heading);
-
-    for (auto* grid : {&list, &links}) {
-        grid->set_row_spacing(2);
-        grid->set_column_spacing(12);
-    }
-
-    list_scroll.set_child(list);
-    links_scroll.set_child(links);
-
-    list_scroll.set_hexpand(false);
-    list_scroll.set_min_content_width(LIST_MIN_WIDTH);
-    list_scroll.set_size_request(LIST_MIN_WIDTH, -1);
-    links_scroll.set_hexpand(true);
-
-    for (auto* scroll : {&list_scroll, &links_scroll}) {
-        scroll->set_vexpand(true);
-        scroll->set_policy(Gtk::PolicyType::AUTOMATIC, Gtk::PolicyType::AUTOMATIC);
-        scroll->set_min_content_height(SECTION_MIN_HEIGHT);
-    }
-
-    columns.set_hexpand(true);
-    columns.set_vexpand(true);
-    columns.append(list_scroll);
-    columns.append(links_scroll);
-    section.append(columns);
-
-    section.set_hexpand(true);
-    section.set_vexpand(true);
-    append(section);
-}
-
-void ProjectsPage::validate_selection() {
-    // Falls back to the highest-ranked item, not the first created.
-    const auto leaves = m_priority.ranked_leaves();
-    if (std::find(leaves.begin(), leaves.end(), m_goal_id) == leaves.end()) {
-        m_goal_id = leaves.empty() ? -1 : leaves.front();
-    }
-
-    const auto projects = m_projects.children_of(Tree::ROOT_ID);
-    if (std::find(projects.begin(), projects.end(), m_project_id) == projects.end()) {
-        m_project_id = projects.empty() ? -1 : projects.front();
-    }
-}
-
 void ProjectsPage::rebuild() {
+    while (auto* child = m_ranked.get_first_child()) m_ranked.remove(*child);
+
+    const auto ranked = m_requirements.ranked(m_priority.priorities());
+
+    // Falls back to the highest-ranked requirement.
+    bool selection_valid = false;
+    int first = -1;
+    double covered = 0.0;
+    for (const auto& line : ranked) {
+        if (line.requirement_id == -1) continue;
+        if (first == -1) first = line.requirement_id;
+        if (line.requirement_id == m_requirement_id) selection_valid = true;
+        if (m_requirements.is_served(line.requirement_id)) covered += line.share;
+    }
+    if (!selection_valid) m_requirement_id = first;
+
+    m_covered.set_text(percent(covered) + " covered");
+    m_covered.set_visible(first != -1);
+
+    for (const auto& line : ranked) {
+        const bool empty_leaf = line.requirement_id == -1;
+        const std::string text = empty_leaf ? m_life.display_title(line.leaf_id) + ": none yet"
+                                            : m_requirements.title(line.requirement_id);
+
+        auto* row = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 8);
+        auto* name = Gtk::make_managed<Gtk::Label>(text);
+        name->set_xalign(0.0);
+        name->set_hexpand(true);
+        name->set_ellipsize(Pango::EllipsizeMode::END);
+        name->set_max_width_chars(20);
+        name->set_tooltip_text(text);
+        row->append(*name);
+
+        auto* value = Gtk::make_managed<Gtk::Label>(percent(line.share));
+        value->add_css_class("dim-label");
+        row->append(*value);
+
+        auto* button = Gtk::make_managed<Gtk::Button>();
+        button->set_child(*row);
+        button->set_has_frame(false);
+
+        // A leaf with none yet has nothing to link here.
+        if (empty_leaf) {
+            button->set_sensitive(false);
+        } else if (line.requirement_id == m_requirement_id) {
+            button->set_has_frame(true);
+            button->add_css_class("suggested-action");
+        } else if (m_requirements.is_served(line.requirement_id)) {
+            // Not on the selected row: suggested-action owns its text color.
+            button->add_css_class("leaf-served");
+        }
+
+        const int id = line.requirement_id;
+        button->signal_clicked().connect([this, id]() {
+            if (m_requirement_id == id) return;
+            m_requirement_id = id;
+            m_refresh.request();
+        });
+        m_ranked.append(*button);
+    }
+
+    if (ranked.empty()) m_ranked.append(*dim_label("Add a leaf to the life tree"));
+
+    rebuild_projects();
+}
+
+void ProjectsPage::rebuild_projects() {
     m_populating = true;
+    while (auto* child = m_project_checks.get_first_child()) m_project_checks.remove(*child);
 
-    for (auto* grid : {&m_goal_list, &m_goal_links, &m_project_list, &m_project_links}) {
-        while (auto* child = grid->get_first_child()) grid->remove(*child);
+    m_selected_title.set_visible(m_requirement_id != -1);
+    if (m_requirement_id == -1) {
+        m_project_checks.append(*dim_label("Requirements are added on the Life Tree page"));
+        m_populating = false;
+        return;
     }
+    m_selected_title.set_text(m_requirements.title(m_requirement_id));
 
-    validate_selection();
-
-    const auto leaves = m_priority.ranked_leaves();
     const auto projects = m_projects.children_of(Tree::ROOT_ID);
+    if (projects.empty()) m_project_checks.append(*dim_label("No projects yet"));
 
-    // Left half: a leaf, and each project's share of delivering it.
-    int row = 0;
-    for (int leaf : leaves) {
-        append_selector_row(m_goal_list, row++, Axis::GOAL, leaf, m_life.display_title(leaf));
-    }
-
-    if (m_goal_id < 0) {
-        append_empty_note(m_goal_links, "Add a leaf to the life tree");
-    } else if (projects.empty()) {
-        append_empty_note(m_goal_links, "No projects yet");
-    } else {
-        row = 0;
-        for (int project : projects) {
-            append_link_row(m_goal_links, row++, Axis::GOAL, project, m_goal_id,
-                            m_projects.display_title(project));
-        }
-    }
-
-    // Right half: a project, and how much of it is about each leaf.
-    row = 0;
+    const auto linked = m_requirements.projects_of(m_requirement_id);
     for (int project : projects) {
-        append_selector_row(m_project_list, row++, Axis::PROJECT, project,
-                            m_projects.display_title(project));
-    }
+        auto* check = Gtk::make_managed<Gtk::CheckButton>(m_projects.display_title(project));
+        check->set_active(std::find(linked.begin(), linked.end(), project) != linked.end());
 
-    if (m_project_id < 0) {
-        append_empty_note(m_project_links, "Add a project");
-    } else if (leaves.empty()) {
-        append_empty_note(m_project_links, "Add a leaf to the life tree");
-    } else {
-        row = 0;
-        for (int leaf : leaves) {
-            append_link_row(m_project_links, row++, Axis::PROJECT, m_project_id, leaf,
-                            m_life.display_title(leaf));
-        }
+        // Deferred: the change emits, which rebuilds this list, check included.
+        const int requirement = m_requirement_id;
+        check->signal_toggled().connect([this, check, requirement, project]() {
+            if (m_populating) return;
+            const bool now_linked = check->get_active();
+            Glib::signal_idle().connect_once([this, requirement, project, now_linked]() {
+                if (now_linked) {
+                    m_requirements.link_project(requirement, project);
+                } else {
+                    m_requirements.unlink_project(requirement, project);
+                }
+            });
+        });
+        m_project_checks.append(*check);
     }
 
     m_populating = false;
-}
-
-void ProjectsPage::append_empty_note(Gtk::Grid& grid, const std::string& text) {
-    grid.attach(*dim_label(text), 0, 0);
-}
-
-void ProjectsPage::append_selector_row(Gtk::Grid& grid, int row, Axis axis, int id,
-                                       const std::string& title) {
-    auto* button = Gtk::make_managed<Gtk::Button>(title);
-    button->set_halign(Gtk::Align::FILL);
-    button->set_hexpand(true);
-    button->set_has_frame(false);
-
-    if (auto* label = dynamic_cast<Gtk::Label*>(button->get_child())) {
-        label->set_halign(Gtk::Align::START);
-        label->set_ellipsize(Pango::EllipsizeMode::END);
-    }
-
-    const int selected = (axis == Axis::GOAL) ? m_goal_id : m_project_id;
-    if (selected == id) {
-        button->set_has_frame(true);
-        button->add_css_class("suggested-action");
-    } else if (axis == Axis::GOAL && !m_priority.projects_for(id).empty()) {
-        // Not on the selected row: suggested-action owns its text color.
-        button->add_css_class("leaf-served");
-    }
-
-    // No toggle-off: a click always moves the selection.
-    button->signal_clicked().connect([this, axis, id]() {
-        if (axis == Axis::GOAL) {
-            if (m_goal_id == id) return;
-            m_goal_id = id;
-        } else {
-            if (m_project_id == id) return;
-            m_project_id = id;
-        }
-        m_refresh.request();
-    });
-
-    grid.attach(*button, 0, row);
-}
-
-void ProjectsPage::append_link_row(Gtk::Grid& grid, int row, Axis axis, int project_id, int leaf_id,
-                                   const std::string& title) {
-    const bool linked = m_priority.has_link(project_id, leaf_id);
-
-    auto* check = Gtk::make_managed<Gtk::CheckButton>();
-    check->set_active(linked);
-    grid.attach(*check, 0, row);
-
-    auto* label = Gtk::make_managed<Gtk::Label>(title);
-    label->set_halign(Gtk::Align::START);
-    label->set_max_width_chars(34);
-    label->set_ellipsize(Pango::EllipsizeMode::END);
-    grid.attach(*label, 1, row);
-
-    const bool goal_axis = (axis == Axis::GOAL);
-    const double value = goal_axis ? m_priority.goal_share(project_id, leaf_id)
-                                   : m_priority.project_share(project_id, leaf_id);
-
-    auto* spin =
-        Gtk::make_managed<Gtk::SpinButton>(Gtk::Adjustment::create(value, 0.0, 100.0, 1.0, 5.0));
-    spin->set_digits(0);
-    spin->set_width_chars(3);
-    spin->set_sensitive(linked);
-    if (!linked) spin->set_text("");
-    grid.attach(*spin, 2, row);
-
-    // Both handlers defer to an idle: the change emits, which rebuilds these
-    // grids, including the widget currently inside its own handler.
-    check->signal_toggled().connect([this, check, project_id, leaf_id]() {
-        if (m_populating) return;
-        const bool now_linked = check->get_active();
-        Glib::signal_idle().connect_once([this, now_linked, project_id, leaf_id]() {
-            if (now_linked) {
-                m_priority.set_link(project_id, leaf_id);
-            } else {
-                m_priority.clear_link(project_id, leaf_id);
-            }
-        });
-    });
-
-    spin->signal_value_changed().connect([this, spin, project_id, leaf_id, goal_axis]() {
-        if (m_populating) return;
-        const double v = spin->get_value();
-        Glib::signal_idle().connect_once([this, v, project_id, leaf_id, goal_axis]() {
-            if (goal_axis) {
-                m_priority.set_goal_share(project_id, leaf_id, v);
-            } else {
-                m_priority.set_project_share(project_id, leaf_id, v);
-            }
-        });
-    });
 }

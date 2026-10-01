@@ -16,13 +16,15 @@
 class TreeController;
 class TaskAttributes;
 class Priority;
+class Requirements;
 
 // Every task workable right now, interleaved by project
 // priority. Read-only; double-click sends a task to the schedule.
 // Optionally narrowed to one project, for this session only.
 class TaskPanel : public Gtk::Box {
 public:
-    TaskPanel(TreeController& projects, TaskAttributes& task_attributes, Priority& priority);
+    TaskPanel(TreeController& projects, TaskAttributes& task_attributes, Priority& priority,
+              Requirements& requirements);
     ~TaskPanel() override = default;
 
     void refresh();
@@ -33,6 +35,7 @@ private:
     TreeController& m_projects;
     TaskAttributes& m_task_attributes;
     Priority& m_priority;
+    Requirements& m_requirements;
 
     Glib::RefPtr<Gio::ListStore<Glib::Object>> m_store;
     Gtk::ListView m_list_view;
