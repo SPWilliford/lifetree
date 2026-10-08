@@ -78,6 +78,14 @@ public:
     // Done for today. Only ever true inside a recurring subtree.
     bool satisfied_today(int id) const;
 
+    // How many more times it's due today: target minus done, never below
+    // zero. 1 for a task that doesn't recur.
+    int remaining_today(int id) const;
+
+    // Completions of any task since this one was last completed today; -1
+    // if it hasn't been completed today.
+    int finished_since(int id) const;
+
     // --- Ordering ---
     //
     // Marks the PARENT: its children happen in order, and only the first
@@ -152,6 +160,7 @@ private:
     // can turn while the app is open; every read checks the date first.
     mutable std::string m_completions_date;
     mutable std::unordered_map<int, int> m_completions;
+    mutable std::vector<int> m_completion_order;  // node ids, earliest first
     void ensure_today() const;
 
     void clear_repeats_below(int id);

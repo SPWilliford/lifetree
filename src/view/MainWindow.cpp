@@ -17,10 +17,11 @@ constexpr int TASK_START = 420;
 
 MainWindow::MainWindow(App& app)
     : m_projects_panel(app.projects(), app.task_attributes()),
+      m_day_page(app.day()),
       m_life_tree_page(app.life(), app.priority(), app.requirements()),
       m_projects_page(app.life(), app.projects(), app.priority(), app.requirements()),
       m_review_page(app.life(), app.priority(), app.requirements(), app.work()),
-      m_schedule_panel(app.projects(), app.work(), app.task_attributes(), app.day()),
+      m_schedule_panel(app.projects(), app.work(), app.task_attributes()),
       m_task_panel(app.projects(), app.task_attributes(), app.priority(), app.requirements()) {
     set_title("LifeTree");
     set_default_size(WINDOW_WIDTH, WINDOW_HEIGHT);
@@ -34,12 +35,14 @@ MainWindow::MainWindow(App& app)
     set_titlebar(m_header_bar);
 
     m_nav_actions = Gio::SimpleActionGroup::create();
+    m_nav_actions->add_action("day", [this]() { show_mode("day", "Day", ""); });
     m_nav_actions->add_action("lifetree", [this]() { show_mode("priority", "Life Tree", "life"); });
     m_nav_actions->add_action("projects", [this]() { show_mode("priority", "Projects", "links"); });
     m_nav_actions->add_action("review", [this]() { show_mode("review", "Review", ""); });
     insert_action_group("go", m_nav_actions);
 
     auto menu = Gio::Menu::create();
+    menu->append("Day", "go.day");
     menu->append("Life Tree", "go.lifetree");
     menu->append("Projects", "go.projects");
     menu->append("Review", "go.review");
@@ -90,6 +93,7 @@ MainWindow::MainWindow(App& app)
 
     m_task_panel.signal_task_chosen().connect(
         sigc::mem_fun(m_schedule_panel, &SchedulePanel::stage_task));
+    m_schedule_panel.signal_day_requested().connect([this]() { show_mode("day", "Day", ""); });
 
     // --- priority ---
     m_to_projects_button.set_icon_name("go-down-symbolic");
@@ -124,6 +128,7 @@ MainWindow::MainWindow(App& app)
 
     // --- modes ---
     m_mode_stack.add(m_daily_page, "daily");
+    m_mode_stack.add(m_day_page, "day");
     m_mode_stack.add(m_priority_page, "priority");
     m_mode_stack.add(m_review_page, "review");
     m_mode_stack.set_transition_type(Gtk::StackTransitionType::CROSSFADE);

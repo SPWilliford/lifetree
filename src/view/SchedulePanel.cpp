@@ -7,11 +7,9 @@
 
 #include <cairomm/surface.h>
 #include <glibmm/main.h>
-#include <gtkmm/entry.h>
 #include <pangomm/layout.h>
 
 #include "core/Clock.hpp"
-#include "core/Day.hpp"
 #include "core/TaskAttributes.hpp"
 #include "core/TreeController.hpp"
 #include "core/Work.hpp"
@@ -317,13 +315,11 @@ void draw_now_marker(const Cairo::RefPtr<Cairo::Context>& cr, const style::Palet
 
 }  // namespace
 
-SchedulePanel::SchedulePanel(TreeController& projects, Work& work, TaskAttributes& task_attributes,
-                             Day& day)
+SchedulePanel::SchedulePanel(TreeController& projects, Work& work, TaskAttributes& task_attributes)
     : Gtk::Box(Gtk::Orientation::VERTICAL, 0),
       m_projects(projects),
       m_work(work),
-      m_task_attributes(task_attributes),
-      m_day(day) {
+      m_task_attributes(task_attributes) {
     initialize_layout();
     refresh_completed_bands();
     refresh_scheduled_bands();
@@ -382,15 +378,12 @@ void SchedulePanel::initialize_layout() {
 
     m_day_button.set_child(m_dock_date);
     m_day_button.set_has_frame(false);
-    m_day_button.set_popover(m_day_menu);
-
-    // Rebuilt on every open, so inherited hours show correctly.
-    m_day_menu.signal_show().connect(sigc::mem_fun(*this, &SchedulePanel::build_day_menu));
+    m_day_button.signal_clicked().connect([this]() { m_day_requested.emit(); });
     m_day_button.set_halign(Gtk::Align::FILL);
     m_day_button.set_valign(Gtk::Align::FILL);
     m_day_button.set_vexpand(true);
     m_day_button.add_css_class("day-button");
-    m_day_button.set_tooltip_text("The day's start, end and review");
+    m_day_button.set_tooltip_text("Day");
 
     m_timeline_dock.append(m_day_button);
     m_timeline_dock.append(m_timeline_controls);
@@ -592,53 +585,6 @@ void SchedulePanel::stage_task(int task_id) {
     if (m_work.has_active_session()) return;  // can't swap out a task being worked
     m_staged_id = task_id;
     refresh_staged_label();
-}
-
-void SchedulePanel::build_day_menu() {
-    auto* box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::VERTICAL, 8);
-    box->set_margin(10);
-
-    auto* heading = Gtk::make_managed<Gtk::Label>("Working day");
-    heading->set_xalign(0.0);
-    heading->add_css_class("heading");
-    box->append(*heading);
-
-    const DayHoursRow hours = m_day.hours();
-
-    auto* times_box = Gtk::make_managed<Gtk::Box>(Gtk::Orientation::HORIZONTAL, 4);
-    auto* start_entry = Gtk::make_managed<Gtk::Entry>();
-    auto* end_entry = Gtk::make_managed<Gtk::Entry>();
-
-    start_entry->set_placeholder_text("--:--");
-    end_entry->set_placeholder_text("--:--");
-    start_entry->set_max_width_chars(6);
-    end_entry->set_max_width_chars(6);
-
-    if (hours.defined()) {
-        start_entry->set_text(clock_util::format_hhmm(hours.start_minutes));
-        end_entry->set_text(clock_util::format_hhmm(hours.end_minutes));
-    }
-
-    times_box->append(*start_entry);
-    times_box->append(*Gtk::make_managed<Gtk::Label>("to"));
-    times_box->append(*end_entry);
-    box->append(*times_box);
-
-    auto* apply_button = Gtk::make_managed<Gtk::Button>("Set");
-    apply_button->signal_clicked().connect([this, start_entry, end_entry]() {
-        const int start = clock_util::parse_hhmm(start_entry->get_text());
-        const int end = clock_util::parse_hhmm(end_entry->get_text());
-
-        m_day_menu.popdown();
-
-        // Both or neither: a start with no end has no denominator.
-        if (start == DayHoursRow::NO_HOURS || end == DayHoursRow::NO_HOURS) return;
-
-        Glib::signal_idle().connect_once([this, start, end]() { m_day.set_hours(start, end); });
-    });
-    box->append(*apply_button);
-
-    m_day_menu.set_child(*box);
 }
 
 void SchedulePanel::refresh_date_label() {

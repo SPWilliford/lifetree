@@ -28,26 +28,63 @@ std::vector<int> interleave(const std::vector<Candidate>& candidates,
         pass[project_id] = stride[project_id];
     }
 
+    const long gap = std::max<long>(2, static_cast<long>(queues.size()));
+
+    // Row of each task's last appearance. A completion today counts as an
+    // appearance above the top, one row further up per task finished since.
+    std::unordered_map<int, long> last_row;
+    for (const auto& candidate : candidates) {
+        if (candidate.finished_since >= 0) {
+            last_row[candidate.task_id] = -1 - static_cast<long>(candidate.finished_since);
+        }
+    }
+    auto ready_at = [&](int task_id) {
+        auto it = last_row.find(task_id);
+        return it == last_row.end() ? 0L : it->second + gap;
+    };
+
     std::vector<int> ordered;
     ordered.reserve(candidates.size());
 
-    std::map<int, std::size_t> cursor;
-    while (true) {
+    while (ordered.size() < candidates.size()) {
+        const long row = static_cast<long>(ordered.size());
+
+        // The lowest-pass project with a task ready for this row.
         int chosen = -1;
-        double lowest_pass = 0.0;
+        std::size_t chosen_index = 0;
         for (const auto& [project_id, tasks] : queues) {
-            if (cursor[project_id] >= tasks.size()) continue;
-            const double project_pass = pass.at(project_id);
-            // Strictly less: an exact tie keeps the lower id.
-            if (chosen == -1 || project_pass < lowest_pass) {
-                chosen = project_id;
-                lowest_pass = project_pass;
+            for (std::size_t i = 0; i < tasks.size(); ++i) {
+                if (ready_at(tasks[i]) > row) continue;
+                // Strictly less: an exact tie keeps the lower id.
+                if (chosen == -1 || pass.at(project_id) < pass.at(chosen)) {
+                    chosen = project_id;
+                    chosen_index = i;
+                }
+                break;
             }
         }
-        if (chosen == -1) break;
 
-        ordered.push_back(queues[chosen][cursor[chosen]]);
-        ++cursor[chosen];
+        // Everything left is held back: take whatever is ready soonest, so
+        // every candidate still appears.
+        if (chosen == -1) {
+            long soonest = 0;
+            for (const auto& [project_id, tasks] : queues) {
+                for (std::size_t i = 0; i < tasks.size(); ++i) {
+                    const long at = ready_at(tasks[i]);
+                    if (chosen == -1 || at < soonest) {
+                        chosen = project_id;
+                        chosen_index = i;
+                        soonest = at;
+                    }
+                }
+            }
+        }
+
+        auto& tasks = queues[chosen];
+        const int task_id = tasks[chosen_index];
+        tasks.erase(tasks.begin() + static_cast<std::ptrdiff_t>(chosen_index));
+        ordered.push_back(task_id);
+        last_row[task_id] = row;
         pass[chosen] += stride[chosen];
     }
 

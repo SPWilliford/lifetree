@@ -8,6 +8,8 @@ void Day::load() {
     // Blanked, not filled: the first read does the load.
     m_cached_date.clear();
     m_cached = DayHoursRow{};
+
+    m_notes = m_db->load_notes();
 }
 
 void Day::ensure_today() const {
@@ -40,4 +42,10 @@ void Day::clear_hours() {
     // Re-read rather than blanked: today inherits again.
     m_cached_date.clear();
     m_changed.emit();
+}
+
+void Day::set_notes(std::string_view text) {
+    if (text == m_notes) return;
+    if (!m_db->set_notes(text)) return;
+    m_notes = std::string(text);
 }

@@ -13,6 +13,7 @@
 #include <gtkmm/stack.h>
 #include <gtkmm/window.h>
 
+#include "view/DayPage.hpp"
 #include "view/LifeTreePage.hpp"
 #include "view/ProjectTreePanel.hpp"
 #include "view/ProjectsPage.hpp"
@@ -64,9 +65,10 @@ private:
     Gtk::Button m_to_projects_button;
     Gtk::Button m_to_life_tree_button;
 
-    Gtk::Stack m_mode_stack;  // daily | priority | review
+    Gtk::Stack m_mode_stack;  // daily | day | priority | review
 
     ProjectTreePanel m_projects_panel;
+    DayPage m_day_page;
     LifeTreePage m_life_tree_page;
     ProjectsPage m_projects_page;
     ReviewPage m_review_page;

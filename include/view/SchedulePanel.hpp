@@ -10,9 +10,8 @@
 #include <gtkmm/button.h>
 #include <gtkmm/drawingarea.h>
 #include <gtkmm/label.h>
-#include <gtkmm/menubutton.h>
-#include <gtkmm/popover.h>
 #include <gtkmm/tooltip.h>
+#include <sigc++/signal.h>
 
 #include "core/Database.hpp"
 #include "view/Refresh.hpp"
@@ -20,7 +19,6 @@
 class TreeController;
 class Work;
 class TaskAttributes;
-class Day;
 
 // Two docks across the top (the day; the staged task and its transport)
 // and the timeline below. Time runs inverted: future above, past below.
@@ -29,17 +27,19 @@ class Day;
 // is the only route to Work::complete().
 class SchedulePanel : public Gtk::Box {
 public:
-    SchedulePanel(TreeController& projects, Work& work, TaskAttributes& task_attributes, Day& day);
+    SchedulePanel(TreeController& projects, Work& work, TaskAttributes& task_attributes);
     ~SchedulePanel() override = default;
 
     // Replaces whatever was staged, unless a session is active.
     void stage_task(int task_id);
 
+    // The date was clicked: the owner opens the Day page.
+    sigc::signal<void()> signal_day_requested() { return m_day_requested; }
+
 private:
     TreeController& m_projects;
     Work& m_work;
     TaskAttributes& m_task_attributes;
-    Day& m_day;
 
     // The only task this panel can act on; -1 for none. View state, not
     // Work's: which slot is filled is a selection, not a fact about time.
@@ -63,8 +63,7 @@ private:
 
     // Left dock: the day. Its width is measured to the timeline's rule.
     Gtk::Box m_timeline_dock{Gtk::Orientation::VERTICAL, 4};
-    Gtk::MenuButton m_day_button;  // the date label doubles as the button
-    Gtk::Popover m_day_menu;
+    Gtk::Button m_day_button;  // the date label doubles as the button
     Gtk::Label m_dock_date;
     Gtk::Box m_timeline_controls{Gtk::Orientation::HORIZONTAL, 4};  // reserved
 
@@ -90,7 +89,6 @@ private:
     Gtk::DrawingArea m_timeline;
 
     void initialize_layout();
-    void build_day_menu();
     void refresh_staged_label();
     void refresh_elapsed_label();
     void refresh_date_label();
@@ -108,6 +106,8 @@ private:
     Refresh m_label_refresh{sigc::mem_fun(*this, &SchedulePanel::refresh_staged_label)};
     Refresh m_bands_refresh{sigc::mem_fun(*this, &SchedulePanel::refresh_completed_bands)};
     Refresh m_scheduled_refresh{sigc::mem_fun(*this, &SchedulePanel::refresh_scheduled_bands)};
+
+    sigc::signal<void()> m_day_requested;
 };
 
 #endif

@@ -160,6 +160,11 @@ public:
     // when nothing has ever been set.
     DayHoursRow load_day_hours(const std::string& date);
 
+    // --- notes ---
+    // The general notes, not tied to any date. "" when none were written.
+    std::string load_notes();
+    bool set_notes(std::string_view text);
+
     // --- task attributes (row existence is the flag) ---
     bool insert_sequential(int node_id);
     bool remove_sequential(int node_id);

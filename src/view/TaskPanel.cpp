@@ -145,14 +145,8 @@ void TaskPanel::on_bind(const Glib::RefPtr<Gtk::ListItem>& item) {
     const int id = obj->node_id();
     const TaskSnapshot snap = m_task_attributes.snapshot(id);
 
-    // "Pushups  1/3" for a task due more than once a day.
-    std::string text = snap.title;
-    const int target = m_task_attributes.target_count(id);
-    if (target > 1) {
-        text += "  " + std::to_string(m_task_attributes.completions_today(id)) + "/" +
-                std::to_string(target);
-    }
-    style::set_colored_text(*title_label, text, snap.color);
+    // A task due several times a day has a row per remaining instance.
+    style::set_colored_text(*title_label, snap.title, snap.color);
 
     // The path is the tooltip; project color carries it in the row.
     box->set_tooltip_text(snap.path.empty() ? snap.title : snap.path + " - " + snap.title);
@@ -216,7 +210,11 @@ void TaskPanel::refresh() {
     for (int id : m_task_attributes.eligible_today()) {
         const int root_id = m_task_attributes.project_root_of(id);
         if (m_filter_root_id > 0 && root_id != m_filter_root_id) continue;
-        candidates.push_back({id, root_id});
+
+        const int since = m_task_attributes.finished_since(id);
+        for (int i = 0; i < m_task_attributes.remaining_today(id); ++i) {
+            candidates.push_back({id, root_id, since});
+        }
     }
 
     // eligible_today is an unordered set; the scheduler is only as

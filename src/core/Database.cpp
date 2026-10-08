@@ -89,6 +89,8 @@ private:
     int m_next = 1;  // next parameter position; sqlite counts from 1
 };
 
+constexpr int GENERAL_NOTES_ID = 1;
+
 // Prepare, bind in order, step once.
 template <typename... Params>
 bool write(sqlite3* db, const std::string& sql, const Params&... params) {
@@ -200,6 +202,12 @@ void Database::create_schema() {
         "  date TEXT PRIMARY KEY, "
         "  start_minutes INTEGER NOT NULL, "
         "  end_minutes INTEGER NOT NULL);");
+
+    // One row today, id GENERAL_NOTES_ID; the id leaves room for more.
+    execute(
+        "CREATE TABLE IF NOT EXISTS notes ("
+        "  id INTEGER PRIMARY KEY, "
+        "  text TEXT NOT NULL);");
 
     execute(
         "CREATE TABLE IF NOT EXISTS sequential_nodes ("
@@ -624,6 +632,22 @@ DayHoursRow Database::load_day_hours(const std::string& date) {
         row.end_minutes = stmt.column_int(1);
     }
     return row;
+}
+
+// ---------------------------------------------------------------------
+// Notes
+// ---------------------------------------------------------------------
+
+std::string Database::load_notes() {
+    Statement stmt(m_db, "SELECT text FROM notes WHERE id = ?;");
+    if (!stmt) return "";
+    stmt.bind(GENERAL_NOTES_ID);
+    return stmt.step() ? stmt.column_text(0) : "";
+}
+
+bool Database::set_notes(std::string_view text) {
+    return write(m_db, "INSERT OR REPLACE INTO notes (id, text) VALUES (?, ?);", GENERAL_NOTES_ID,
+                 text);
 }
 
 // ---------------------------------------------------------------------

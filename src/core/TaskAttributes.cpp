@@ -28,6 +28,7 @@ void TaskAttributes::load() {
     // Blanked, not filled: the first read does the load.
     m_completions_date.clear();
     m_completions.clear();
+    m_completion_order.clear();
 }
 
 // ---------------------------------------------------------------------
@@ -125,8 +126,10 @@ void TaskAttributes::ensure_today() const {
     if (m_completions_date == now_date) return;
 
     m_completions.clear();
+    m_completion_order.clear();
     for (const auto& row : m_db->load_completions_for_date(now_date)) {
         m_completions[row.node_id]++;
+        m_completion_order.push_back(row.node_id);
     }
     m_completions_date = now_date;
 }
@@ -148,6 +151,7 @@ void TaskAttributes::record_completion(int id) {
 
     if (!m_db->insert_completion(row)) return;
     m_completions[id]++;
+    m_completion_order.push_back(id);
     m_changed.emit();
 }
 
@@ -167,6 +171,21 @@ int TaskAttributes::target_count(int id) const {
 bool TaskAttributes::satisfied_today(int id) const {
     if (!recurs(id)) return false;
     return completions_today(id) >= target_count(id);
+}
+
+int TaskAttributes::remaining_today(int id) const {
+    if (!recurs(id)) return 1;
+    return std::max(0, target_count(id) - completions_today(id));
+}
+
+int TaskAttributes::finished_since(int id) const {
+    ensure_today();
+    for (std::size_t i = m_completion_order.size(); i > 0; --i) {
+        if (m_completion_order[i - 1] == id) {
+            return static_cast<int>(m_completion_order.size() - i);
+        }
+    }
+    return -1;
 }
 
 // ---------------------------------------------------------------------

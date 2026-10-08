@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cstddef>
 #include <vector>
 
 #include "core/Scheduler.hpp"
@@ -58,4 +59,64 @@ TEST(interleave_unlinked_project_goes_last_not_missing) {
 TEST(interleave_preserves_order_within_project) {
     auto ordered = scheduler::interleave(tasks(1, 5, 3), {{1, 100.0}});
     CHECK_EQ(ordered, (std::vector<int>{5, 6, 7}));
+}
+
+namespace {
+std::vector<int> rows_of(const std::vector<int>& ordered, int task_id) {
+    std::vector<int> rows;
+    for (std::size_t i = 0; i < ordered.size(); ++i) {
+        if (ordered[i] == task_id) rows.push_back(static_cast<int>(i));
+    }
+    return rows;
+}
+}  // namespace
+
+TEST(repeated_task_keeps_a_rotation_between_appearances) {
+    // Water x3 in a top-priority project, two other projects: gap of 3.
+    std::vector<scheduler::Candidate> candidates{{7, 1}, {7, 1}, {7, 1}};
+    auto more = tasks(2, 200, 6);
+    candidates.insert(candidates.end(), more.begin(), more.end());
+    more = tasks(3, 300, 6);
+    candidates.insert(candidates.end(), more.begin(), more.end());
+
+    const auto ordered = scheduler::interleave(candidates, {{1, 80.0}, {2, 10.0}, {3, 10.0}});
+    CHECK_EQ(ordered.size(), 15u);
+    const auto water = rows_of(ordered, 7);
+    CHECK_EQ(water.size(), 3u);
+    if (water.size() != 3) return;
+    CHECK_EQ(water[0], 0);
+    CHECK(water[1] - water[0] >= 3);
+    CHECK(water[2] - water[1] >= 3);
+}
+
+TEST(a_just_finished_repeat_starts_a_rotation_down) {
+    std::vector<scheduler::Candidate> candidates{{7, 1, 0}, {7, 1, 0}};
+    auto more = tasks(2, 200, 4);
+    candidates.insert(candidates.end(), more.begin(), more.end());
+    more = tasks(3, 300, 4);
+    candidates.insert(candidates.end(), more.begin(), more.end());
+
+    // Gap 3; just finished counts as the row above the top.
+    const auto ordered = scheduler::interleave(candidates, {{1, 80.0}, {2, 10.0}, {3, 10.0}});
+    CHECK_EQ(rows_of(ordered, 7).front(), 2);
+}
+
+TEST(a_repeat_finished_a_while_ago_is_not_held_back) {
+    std::vector<scheduler::Candidate> candidates{{7, 1, 5}, {7, 1, 5}};
+    auto more = tasks(2, 200, 4);
+    candidates.insert(candidates.end(), more.begin(), more.end());
+
+    const auto ordered = scheduler::interleave(candidates, {{1, 80.0}, {2, 20.0}});
+    CHECK_EQ(rows_of(ordered, 7).front(), 0);
+}
+
+TEST(a_held_back_repeat_does_not_hold_up_its_project) {
+    // One project: gap is the floor of 2, so the repeat alternates.
+    const std::vector<scheduler::Candidate> candidates{{7, 1}, {7, 1}, {8, 1}, {9, 1}};
+    CHECK_EQ(scheduler::interleave(candidates, {{1, 100.0}}), (std::vector<int>{7, 8, 7, 9}));
+}
+
+TEST(repeats_with_nothing_to_space_them_still_all_appear) {
+    const std::vector<scheduler::Candidate> candidates{{7, 1}, {7, 1}, {7, 1}};
+    CHECK_EQ(scheduler::interleave(candidates, {{1, 100.0}}), (std::vector<int>{7, 7, 7}));
 }
